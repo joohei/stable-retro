@@ -19,15 +19,12 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 // THE SOFTWARE.
 
-#ifndef CAPNP_PRETTY_PRINT_H_
-#define CAPNP_PRETTY_PRINT_H_
-
-#if defined(__GNUC__) && !defined(CAPNP_HEADER_WARNINGS)
-#pragma GCC system_header
-#endif
+#pragma once
 
 #include "dynamic.h"
 #include <kj/string-tree.h>
+
+CAPNP_BEGIN_HEADER
 
 namespace capnp {
 
@@ -44,4 +41,4 @@ kj::StringTree prettyPrint(DynamicList::Builder value);
 
 }  // namespace capnp
 
-#endif  // PRETTY_PRINT_H_
+CAPNP_END_HEADER

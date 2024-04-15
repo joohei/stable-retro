@@ -19,16 +19,92 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 // THE SOFTWARE.
 
-#ifndef KJ_MEMORY_H_
-#define KJ_MEMORY_H_
-
-#if defined(__GNUC__) && !KJ_HEADER_WARNINGS
-#pragma GCC system_header
-#endif
+#pragma once
 
 #include "common.h"
 
+KJ_BEGIN_HEADER
+
 namespace kj {
+
+template <typename T>
+inline constexpr bool _kj_internal_isPolymorphic(T*) {
+  // If you get a compiler error here complaining that T is incomplete, it's because you are trying
+  // to use kj::Own<T> with a type that has only been forward-declared. Since KJ doesn't know if
+  // the type might be involved in inheritance (especially multiple inheritance), it doesn't know
+  // how to correctly call the disposer to destroy the type, since the object's true memory address
+  // may differ from the address used to point to a superclass.
+  //
+  // However, if you know for sure that T is NOT polymorphic (i.e. it doesn't have a vtable and
+  // isn't involved in inheritance), then you can use KJ_DECLARE_NON_POLYMORPHIC(T) to declare this
+  // to KJ without actually completing the type. Place this macro invocation either in the global
+  // scope, or in the same namespace as T is defined.
+  return __is_polymorphic(T);
+}
+
+#define KJ_DECLARE_NON_POLYMORPHIC(...) \
+  inline constexpr bool _kj_internal_isPolymorphic(__VA_ARGS__*) { \
+    return false; \
+  }
+// If you want to use kj::Own<T> for an incomplete type T that you know is not polymorphic, then
+// write `KJ_DECLARE_NON_POLYMORPHIC(T)` either at the global scope or in the same namespace as
+// T is declared.
+//
+// This also works for templates, e.g.:
+//
+//     template <typename X, typename Y>
+//     struct MyType;
+//     template <typename X, typename Y>
+//     KJ_DECLARE_NON_POLYMORPHIC(MyType<X, Y>)
+
+namespace _ {  // private
+
+template <typename T> struct RefOrVoid_ { typedef T& Type; };
+template <> struct RefOrVoid_<void> { typedef void Type; };
+template <> struct RefOrVoid_<const void> { typedef void Type; };
+
+template <typename T>
+using RefOrVoid = typename RefOrVoid_<T>::Type;
+// Evaluates to T&, unless T is `void`, in which case evaluates to `void`.
+//
+// This is a hack needed to avoid defining Own<void> as a totally separate class.
+
+template <typename T, bool isPolymorphic = _kj_internal_isPolymorphic((T*)nullptr)>
+struct CastToVoid_;
+
+template <typename T>
+struct CastToVoid_<T, false> {
+  static void* apply(T* ptr) {
+    return static_cast<void*>(ptr);
+  }
+  static const void* applyConst(T* ptr) {
+    const T* cptr = ptr;
+    return static_cast<const void*>(cptr);
+  }
+};
+
+template <typename T>
+struct CastToVoid_<T, true> {
+  static void* apply(T* ptr) {
+    return dynamic_cast<void*>(ptr);
+  }
+  static const void* applyConst(T* ptr) {
+    const T* cptr = ptr;
+    return dynamic_cast<const void*>(cptr);
+  }
+};
+
+template <typename T>
+void* castToVoid(T* ptr) {
+  return CastToVoid_<T>::apply(ptr);
+}
+
+template <typename T>
+const void* castToConstVoid(T* ptr) {
+  return CastToVoid_<T>::applyConst(ptr);
+}
+
+}  // namespace _ (private)
 
 // =======================================================================================
 // Disposer -- Implementation details.
@@ -64,7 +140,7 @@ public:
   // an exception.
 
 private:
-  template <typename T, bool polymorphic = __is_polymorphic(T)>
+  template <typename T, bool polymorphic = _kj_internal_isPolymorphic((T*)nullptr)>
   struct Dispose_;
 };
 
@@ -120,9 +196,7 @@ public:
       : disposer(other.disposer), ptr(other.ptr) { other.ptr = nullptr; }
   template <typename U, typename = EnableIf<canConvert<U*, T*>()>>
   inline Own(Own<U>&& other) noexcept
-      : disposer(other.disposer), ptr(other.ptr) {
-    static_assert(__is_polymorphic(T),
-        "Casting owned pointers requires that the target type is polymorphic.");
+      : disposer(other.disposer), ptr(cast(other.ptr)) {
     other.ptr = nullptr;
   }
   inline Own(T* ptr, const Disposer& disposer) noexcept: disposer(&disposer), ptr(ptr) {}
@@ -130,7 +204,7 @@ public:
   ~Own() noexcept(false) { dispose(); }
 
   inline Own& operator=(Own&& other) {
-    // Move-assingnment operator.
+    // Move-assignnment operator.
 
     // Careful, this might own `other`.  Therefore we have to transfer the pointers first, then
     // dispose.
@@ -150,6 +224,15 @@ public:
     return *this;
   }
 
+  template <typename... Attachments>
+  Own<T> attach(Attachments&&... attachments) KJ_WARN_UNUSED_RESULT;
+  // Returns an Own<T> which points to the same object but which also ensures that all values
+  // passed to `attachments` remain alive until after this object is destroyed. Normally
+  // `attachments` are other Own<?>s pointing to objects that this one depends on.
+  //
+  // Note that attachments will eventually be destroyed in the order they are listed. Hence,
+  // foo.attach(bar, baz) is equivalent to (but more efficient than) foo.attach(bar).attach(baz).
+
   template <typename U>
   Own<U> downcast() {
     // Downcast the pointer to Own<U>, destroying the original pointer.  If this pointer does not
@@ -168,8 +251,8 @@ public:
 #define NULLCHECK KJ_IREQUIRE(ptr != nullptr, "null Own<> dereference")
   inline T* operator->() { NULLCHECK; return ptr; }
   inline const T* operator->() const { NULLCHECK; return ptr; }
-  inline T& operator*() { NULLCHECK; return *ptr; }
-  inline const T& operator*() const { NULLCHECK; return *ptr; }
+  inline _::RefOrVoid<T> operator*() { NULLCHECK; return *ptr; }
+  inline _::RefOrVoid<const T> operator*() const { NULLCHECK; return *ptr; }
 #undef NULLCHECK
   inline T* get() { return ptr; }
   inline const T* get() const { return ptr; }
@@ -197,9 +280,28 @@ private:
   }
 
   template <typename U>
+  static inline T* cast(U* ptr) {
+    static_assert(_kj_internal_isPolymorphic((T*)nullptr),
+        "Casting owned pointers requires that the target type is polymorphic.");
+    return ptr;
+  }
+
+  template <typename U>
   friend class Own;
   friend class Maybe<Own<T>>;
 };
+
+template <>
+template <typename U>
+inline void* Own<void>::cast(U* ptr) {
+  return _::castToVoid(ptr);
+}
+
+template <>
+template <typename U>
+inline const void* Own<const void>::cast(U* ptr) {
+  return _::castToConstVoid(ptr);
+}
 
 namespace _ {  // private
 
@@ -244,6 +346,13 @@ public:
 
   inline Maybe(decltype(nullptr)) noexcept: ptr(nullptr) {}
 
+  inline Own<T>& emplace(Own<T> value) {
+    // Assign the Maybe to the given value and return the content. This avoids the need to do a
+    // KJ_ASSERT_NONNULL() immediately after setting the Maybe just to read it back again.
+    ptr = kj::mv(value);
+    return ptr;
+  }
+
   inline operator Maybe<T&>() { return ptr.get(); }
   inline operator Maybe<const T&>() const { return ptr.get(); }
 
@@ -264,6 +373,16 @@ public:
       return defaultValue;
     } else {
       return ptr;
+    }
+  }
+
+  template <typename F,
+      typename Result = decltype(instance<bool>() ? instance<Own<T>>() : instance<F>()())>
+  Result orDefault(F&& lazyDefaultValue) && {
+    if (ptr == nullptr) {
+      return lazyDefaultValue();
+    } else {
+      return kj::mv(ptr);
     }
   }
 
@@ -326,8 +445,17 @@ public:
   static const HeapDisposer instance;
 };
 
+#if _MSC_VER && _MSC_VER < 1920 && !defined(__clang__)
+template <typename T>
+__declspec(selectany) const HeapDisposer<T> HeapDisposer<T>::instance = HeapDisposer<T>();
+// On MSVC 2017 we suddenly started seeing a linker error on one specific specialization of
+// `HeapDisposer::instance` when seemingly-unrelated code was modified. Explicitly specifying
+// `__declspec(selectany)` seems to fix it. But why? Shouldn't template members have `selectany`
+// behavior by default? We don't know. It works and we're moving on.
+#else
 template <typename T>
 const HeapDisposer<T> HeapDisposer<T>::instance = HeapDisposer<T>();
+#endif
 
 }  // namespace _ (private)
 
@@ -351,6 +479,21 @@ Own<Decay<T>> heap(T&& orig) {
   typedef Decay<T> T2;
   return Own<T2>(new T2(kj::fwd<T>(orig)), _::HeapDisposer<T2>::instance);
 }
+
+template <typename T, typename... Attachments>
+Own<Decay<T>> attachVal(T&& value, Attachments&&... attachments);
+// Returns an Own<T> that takes ownership of `value` and `attachments`, and points to `value`.
+//
+// This is equivalent to heap(value).attach(attachments), but only does one allocation rather than
+// two.
+
+template <typename T, typename... Attachments>
+Own<T> attachRef(T& value, Attachments&&... attachments);
+// Like attach() but `value` is not moved; the resulting Own<T> points to its existing location.
+// This is preferred if `value` is already owned by one of `attachments`.
+//
+// This is equivalent to Own<T>(&value, kj::NullDisposer::instance).attach(attachments), but
+// is easier to write and allocates slightly less memory.
 
 // =======================================================================================
 // SpaceFor<T> -- assists in manual allocation
@@ -401,6 +544,63 @@ void Disposer::dispose(T* object) const {
   Dispose_<T>::dispose(object, *this);
 }
 
+namespace _ {  // private
+
+template <typename... T>
+struct OwnedBundle;
+
+template <>
+struct OwnedBundle<> {};
+
+template <typename First, typename... Rest>
+struct OwnedBundle<First, Rest...>: public OwnedBundle<Rest...> {
+  OwnedBundle(First&& first, Rest&&... rest)
+      : OwnedBundle<Rest...>(kj::fwd<Rest>(rest)...), first(kj::fwd<First>(first)) {}
+
+  // Note that it's intentional that `first` is destroyed before `rest`. This way, doing
+  // ptr.attach(foo, bar, baz) is equivalent to ptr.attach(foo).attach(bar).attach(baz) in terms
+  // of destruction order (although the former does fewer allocations).
+  Decay<First> first;
+};
+
+template <typename... T>
+struct DisposableOwnedBundle final: public Disposer, public OwnedBundle<T...> {
+  DisposableOwnedBundle(T&&... values): OwnedBundle<T...>(kj::fwd<T>(values)...) {}
+  void disposeImpl(void* pointer) const override { delete this; }
+};
+
+}  // namespace _ (private)
+
+template <typename T>
+template <typename... Attachments>
+Own<T> Own<T>::attach(Attachments&&... attachments) {
+  T* ptrCopy = ptr;
+
+  KJ_IREQUIRE(ptrCopy != nullptr, "cannot attach to null pointer");
+
+  // HACK: If someone accidentally calls .attach() on a null pointer in opt mode, try our best to
+  //   accomplish reasonable behavior: We turn the pointer non-null but still invalid, so that the
+  //   disposer will still be called when the pointer goes out of scope.
+  if (ptrCopy == nullptr) ptrCopy = reinterpret_cast<T*>(1);
+
+  auto bundle = new _::DisposableOwnedBundle<Own<T>, Attachments...>(
+      kj::mv(*this), kj::fwd<Attachments>(attachments)...);
+  return Own<T>(ptrCopy, *bundle);
+}
+
+template <typename T, typename... Attachments>
+Own<T> attachRef(T& value, Attachments&&... attachments) {
+  auto bundle = new _::DisposableOwnedBundle<Attachments...>(kj::fwd<Attachments>(attachments)...);
+  return Own<T>(&value, *bundle);
+}
+
+template <typename T, typename... Attachments>
+Own<Decay<T>> attachVal(T&& value, Attachments&&... attachments) {
+  auto bundle = new _::DisposableOwnedBundle<T, Attachments...>(
+      kj::fwd<T>(value), kj::fwd<Attachments>(attachments)...);
+  return Own<Decay<T>>(&bundle->first, *bundle);
+}
+
 }  // namespace kj
 
-#endif  // KJ_MEMORY_H_
+KJ_END_HEADER

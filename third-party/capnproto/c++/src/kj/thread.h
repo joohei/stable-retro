@@ -19,16 +19,13 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 // THE SOFTWARE.
 
-#ifndef KJ_THREAD_H_
-#define KJ_THREAD_H_
-
-#if defined(__GNUC__) && !KJ_HEADER_WARNINGS
-#pragma GCC system_header
-#endif
+#pragma once
 
 #include "common.h"
 #include "function.h"
 #include "exception.h"
+
+KJ_BEGIN_HEADER
 
 namespace kj {
 
@@ -53,7 +50,10 @@ public:
 
 private:
   struct ThreadState {
+    ThreadState(Function<void()> func);
+
     Function<void()> func;
+    Function<void(Function<void()>)> initializer;
     kj::Maybe<kj::Exception> exception;
 
     unsigned int refcount;
@@ -79,4 +79,4 @@ private:
 
 }  // namespace kj
 
-#endif  // KJ_THREAD_H_
+KJ_END_HEADER

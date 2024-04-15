@@ -19,17 +19,22 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 // THE SOFTWARE.
 
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
+
+#if _WIN32
+#include "win32-api-version.h"
+#endif
+
 #include "io.h"
 #include "debug.h"
 #include "miniposix.h"
 #include <algorithm>
 #include <errno.h>
+#include "vector.h"
 
 #if _WIN32
-#ifndef NOMINMAX
-#define NOMINMAX 1
-#endif
-#define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include "windows-sanity.h"
 #else
@@ -60,6 +65,45 @@ void InputStream::skip(size_t bytes) {
     read(scratch, amount);
     bytes -= amount;
   }
+}
+
+
+namespace {
+
+Array<byte> readAll(InputStream& input, uint64_t limit, bool nulTerminate) {
+  Vector<Array<byte>> parts;
+  constexpr size_t BLOCK_SIZE = 4096;
+
+  for (;;) {
+    KJ_REQUIRE(limit > 0, "Reached limit before EOF.");
+    auto part = heapArray<byte>(kj::min(BLOCK_SIZE, limit));
+    size_t n = input.tryRead(part.begin(), part.size(), part.size());
+    limit -= n;
+    if (n < part.size()) {
+      auto result = heapArray<byte>(parts.size() * BLOCK_SIZE + n + nulTerminate);
+      byte* pos = result.begin();
+      for (auto& p: parts) {
+        memcpy(pos, p.begin(), BLOCK_SIZE);
+        pos += BLOCK_SIZE;
+      }
+      memcpy(pos, part.begin(), n);
+      pos += n;
+      if (nulTerminate) *pos++ = '\0';
+      KJ_ASSERT(pos == result.end());
+      return result;
+    } else {
+      parts.add(kj::mv(part));
+    }
+  }
+}
+
+}  // namespace
+
+String InputStream::readAllText(uint64_t limit) {
+  return String(readAll(*this, limit, true).releaseAsChars());
+}
+Array<byte> InputStream::readAllBytes(uint64_t limit) {
+  return readAll(*this, limit, false);
 }
 
 void OutputStream::write(ArrayPtr<const ArrayPtr<const byte>> pieces) {
@@ -227,9 +271,9 @@ ArrayPtr<byte> ArrayOutputStream::getWriteBuffer() {
 }
 
 void ArrayOutputStream::write(const void* src, size_t size) {
-  if (src == fillPos) {
+  if (src == fillPos && fillPos != array.end()) {
     // Oh goody, the caller wrote directly into our buffer.
-    KJ_REQUIRE(size <= array.end() - fillPos);
+    KJ_REQUIRE(size <= array.end() - fillPos, size, fillPos, array.end() - fillPos);
     fillPos += size;
   } else {
     KJ_REQUIRE(size <= (size_t)(array.end() - fillPos),
@@ -255,9 +299,9 @@ ArrayPtr<byte> VectorOutputStream::getWriteBuffer() {
 }
 
 void VectorOutputStream::write(const void* src, size_t size) {
-  if (src == fillPos) {
+  if (src == fillPos && fillPos != vector.end()) {
     // Oh goody, the caller wrote directly into our buffer.
-    KJ_REQUIRE(size <= vector.end() - fillPos);
+    KJ_REQUIRE(size <= vector.end() - fillPos, size, fillPos, vector.end() - fillPos);
     fillPos += size;
   } else {
     if (vector.end() - fillPos < size) {
@@ -282,14 +326,13 @@ void VectorOutputStream::grow(size_t minSize) {
 
 AutoCloseFd::~AutoCloseFd() noexcept(false) {
   if (fd >= 0) {
-    unwindDetector.catchExceptionsIfUnwinding([&]() {
-      // Don't use SYSCALL() here because close() should not be repeated on EINTR.
-      if (miniposix::close(fd) < 0) {
-        KJ_FAIL_SYSCALL("close", errno, fd) {
-          break;
-        }
+    // Don't use SYSCALL() here because close() should not be repeated on EINTR.
+    if (miniposix::close(fd) < 0) {
+      KJ_FAIL_SYSCALL("close", errno, fd) {
+        // This ensures we don't throw an exception if unwinding.
+        break;
       }
-    });
+    }
   }
 }
 
@@ -334,7 +377,7 @@ void FdOutputStream::write(ArrayPtr<const ArrayPtr<const byte>> pieces) {
   OutputStream::write(pieces);
 
 #else
-  const size_t iovmax = miniposix::iovMax(pieces.size());
+  const size_t iovmax = miniposix::iovMax();
   while (pieces.size() > iovmax) {
     write(pieces.slice(0, iovmax));
     pieces = pieces.slice(iovmax, pieces.size());

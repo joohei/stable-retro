@@ -1,31 +1,76 @@
-name: Test C++ Stable-Retro code
+name: 'Test C++ Stable-Retro code'
 
-on: [pull_request, push]
+on: [pull_request, push, workflow_dispatch]
 
 permissions:
   contents: read # to fetch code (actions/checkout)
 
 jobs:
-  build:
-    runs-on: ubuntu-latest  # todo, add more OS systems to see if they work as well
+  build-linux:
+    runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v4
-        with:
-          python-version: 3.9
-
-      - name: Install system packages
+      - name: Set up environment
         run: |
           sudo apt-get update
-          sudo apt-get install git cmake capnproto zlib1g-dev build-essential pkg-config libzip-dev software-properties-common libbz2-dev python3-opengl
+          sudo apt-get install -y build-essential cmake libzip-dev
 
-      - name: Install pip package and build tests
+      - name: Build test files
         run: |
-          cmake .
-          make -j
-          make -f tests/Makefile
+          cmake . -G "Unix Makefiles" -DBUILD_PYTHON=OFF
+          make -j$(nproc)
+
+      - name: Run tests
+        run: ctest --progress --verbose
+
+  build-windows:
+    runs-on: windows-latest
+
+    defaults:
+      run:
+        shell: msys2 {0}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up environment
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            mingw-w64-ucrt-x86_64-cmake
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-make
+            mingw-w64-ucrt-x86_64-libzip
+
+      - name: Build test files
+        run: |
+          cmake . -G "MinGW Makefiles" -DBUILD_PYTHON=OFF
+          mingw32-make -j$(nproc)
+
+      - name: Run tests
+        run: ctest --progress --verbose
+
+  build-macos:
+    runs-on: macos-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up environment
+        run: |
+          brew update
+          brew install cmake libzip
+
+      - name: Build test files
+        run: |
+          export MACOSX_DEPLOYMENT_TARGET=10.9
+          export SDKROOT=$(xcrun --sdk macosx --show-sdk-path)
+          cmake . -G "Unix Makefiles" -DBUILD_PYTHON=OFF
+          make -j$(sysctl -n hw.logicalcpu)
 
       - name: Run tests
         run: ctest --progress --verbose

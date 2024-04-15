@@ -19,15 +19,12 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 // THE SOFTWARE.
 
-#ifndef CAPNP_POINTER_HELPERS_H_
-#define CAPNP_POINTER_HELPERS_H_
-
-#if defined(__GNUC__) && !defined(CAPNP_HEADER_WARNINGS)
-#pragma GCC system_header
-#endif
+#pragma once
 
 #include "layout.h"
 #include "list.h"
+
+CAPNP_BEGIN_HEADER
 
 namespace capnp {
 namespace _ {  // private
@@ -157,4 +154,4 @@ struct PointerHelpers<UncheckedMessage> {
 }  // namespace _ (private)
 }  // namespace capnp
 
-#endif  // CAPNP_POINTER_HELPERS_H_
+CAPNP_END_HEADER

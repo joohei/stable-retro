@@ -23,10 +23,10 @@
 // For Unix implementation, see async-io-unix.c++.
 
 // Request Vista-level APIs.
-#define WINVER 0x0600
-#define _WIN32_WINNT 0x0600
+#include "win32-api-version.h"
 
 #include "async-io.h"
+#include "async-io-internal.h"
 #include "async-win32.h"
 #include "debug.h"
 #include "thread.h"
@@ -148,9 +148,28 @@ int win32Socketpair(SOCKET socks[2]) {
     if (connect(socks[0], &a.addr, sizeof(a.inaddr)) == SOCKET_ERROR)
       break;
 
+  retryAccept:
     socks[1] = accept(listener, NULL, NULL);
     if (socks[1] == -1)
       break;
+
+    // Verify that the client is actually us and not someone else who raced to connect first.
+    // (This check added by Kenton for security.)
+    union {
+      struct sockaddr_in inaddr;
+      struct sockaddr addr;
+    } b, c;
+    socklen_t bAddrlen = sizeof(b.inaddr);
+    socklen_t cAddrlen = sizeof(b.inaddr);
+    if (getpeername(socks[1], &b.addr, &bAddrlen) == SOCKET_ERROR)
+      break;
+    if (getsockname(socks[0], &c.addr, &cAddrlen) == SOCKET_ERROR)
+      break;
+    if (bAddrlen != cAddrlen || memcmp(&b.addr, &c.addr, bAddrlen) != 0) {
+      // Someone raced to connect first. Ignore.
+      closesocket(socks[1]);
+      goto retryAccept;
+    }
 
     closesocket(listener);
     return 0;
@@ -168,17 +187,6 @@ int win32Socketpair(SOCKET socks[2]) {
 }  // namespace _
 
 namespace {
-
-bool detectWine() {
-  HMODULE hntdll = GetModuleHandle("ntdll.dll");
-  if(hntdll == NULL) return false;
-  return GetProcAddress(hntdll, "wine_get_version") != nullptr;
-}
-
-bool isWine() {
-  static bool result = detectWine();
-  return result;
-}
 
 // =======================================================================================
 
@@ -289,6 +297,23 @@ public:
       // Enable shutdown() to work.
       setsockopt(SOL_SOCKET, SO_UPDATE_CONNECT_CONTEXT, NULL, 0);
     });
+  }
+
+  Promise<void> whenWriteDisconnected() override {
+    // Windows IOCP does not provide a direct, documented way to detect when the socket disconnects
+    // without actually doing a read or write. However, there is an undocoumented-but-stable
+    // ioctl called IOCTL_AFD_POLL which can be used for this purpose. In fact, select() is
+    // implemented in terms of this ioctl -- performed synchronously -- but it's entirely possible
+    // to put only one socket into the list and perform the ioctl asynchronously. Here's the
+    // source code for select() in Windows 2000 (not sure how this became public...):
+    //
+    //     https://github.com/pustladi/Windows-2000/blob/661d000d50637ed6fab2329d30e31775046588a9/private/net/sockets/winsock2/wsp/msafd/select.c#L59-L655
+    //
+    // And here's an interesting discussion: https://github.com/python-trio/trio/issues/52
+    //
+    // TODO(someday): Implement this with IOCTL_AFD_POLL. For now I'm leaving it unimplemented
+    //   because I added this method for a Linux-only use case.
+    return NEVER_DONE;
   }
 
   void shutdownWrite() override {
@@ -524,11 +549,12 @@ public:
   }
 
   static Promise<Array<SocketAddress>> lookupHost(
-      LowLevelAsyncIoProvider& lowLevel, kj::String host, kj::String service, uint portHint);
+      LowLevelAsyncIoProvider& lowLevel, kj::String host, kj::String service, uint portHint,
+      _::NetworkFilter& filter);
   // Perform a DNS lookup.
 
   static Promise<Array<SocketAddress>> parse(
-      LowLevelAsyncIoProvider& lowLevel, StringPtr str, uint portHint) {
+      LowLevelAsyncIoProvider& lowLevel, StringPtr str, uint portHint, _::NetworkFilter& filter) {
     // TODO(someday):  Allow commas in `str`.
 
     SocketAddress result;
@@ -580,7 +606,8 @@ public:
       port = strtoul(portText->cStr(), &endptr, 0);
       if (portText->size() == 0 || *endptr != '\0') {
         // Not a number.  Maybe it's a service name.  Fall back to DNS.
-        return lookupHost(lowLevel, kj::heapString(addrPart), kj::heapString(*portText), portHint);
+        return lookupHost(lowLevel, kj::heapString(addrPart), kj::heapString(*portText), portHint,
+                          filter);
       }
       KJ_REQUIRE(port < 65536, "Port number too large.");
     } else {
@@ -612,33 +639,56 @@ public:
       addrTarget = &result.addr.inet4.sin_addr;
     }
 
-    // addrPart is not necessarily NUL-terminated so we have to make a copy.  :(
     char buffer[64];
-    KJ_REQUIRE(addrPart.size() < sizeof(buffer) - 1, "IP address too long.", addrPart);
-    memcpy(buffer, addrPart.begin(), addrPart.size());
-    buffer[addrPart.size()] = '\0';
+    if (addrPart.size() < sizeof(buffer) - 1) {
+      // addrPart is not necessarily NUL-terminated so we have to make a copy.  :(
+      memcpy(buffer, addrPart.begin(), addrPart.size());
+      buffer[addrPart.size()] = '\0';
 
-    // OK, parse it!
-    switch (InetPtonA(af, buffer, addrTarget)) {
-      case 1: {
-        // success.
-        auto array = kj::heapArrayBuilder<SocketAddress>(1);
-        array.add(result);
-        return array.finish();
+      // OK, parse it!
+      switch (InetPtonA(af, buffer, addrTarget)) {
+        case 1: {
+          // success.
+          if (!result.parseAllowedBy(filter)) {
+            KJ_FAIL_REQUIRE("address family blocked by restrictPeers()");
+            return Array<SocketAddress>();
+          }
+
+          auto array = kj::heapArrayBuilder<SocketAddress>(1);
+          array.add(result);
+          return array.finish();
+        }
+        case 0:
+          // It's apparently not a simple address...  fall back to DNS.
+          break;
+        default:
+          KJ_FAIL_WIN32("InetPton", WSAGetLastError(), af, addrPart);
       }
-      case 0:
-        // It's apparently not a simple address...  fall back to DNS.
-        return lookupHost(lowLevel, kj::heapString(addrPart), nullptr, port);
-      default:
-        KJ_FAIL_WIN32("InetPton", WSAGetLastError(), af, addrPart);
     }
+
+    return lookupHost(lowLevel, kj::heapString(addrPart), nullptr, port, filter);
   }
 
-  static SocketAddress getLocalAddress(int sockfd) {
+  static SocketAddress getLocalAddress(SOCKET sockfd) {
     SocketAddress result;
     result.addrlen = sizeof(addr);
     KJ_WINSOCK(getsockname(sockfd, &result.addr.generic, &result.addrlen));
     return result;
+  }
+
+  static SocketAddress getPeerAddress(SOCKET sockfd) {
+    SocketAddress result;
+    result.addrlen = sizeof(addr);
+    KJ_WINSOCK(getpeername(sockfd, &result.addr.generic, &result.addrlen));
+    return result;
+  }
+
+  bool allowedBy(LowLevelAsyncIoProvider::NetworkFilter& filter) {
+    return filter.shouldAllow(&addr.generic, addrlen);
+  }
+
+  bool parseAllowedBy(_::NetworkFilter& filter) {
+    return filter.shouldAllowParse(&addr.generic, addrlen);
   }
 
   static SocketAddress getWildcardForFamily(int family) {
@@ -680,8 +730,9 @@ class SocketAddress::LookupReader {
   // getaddrinfo.
 
 public:
-  LookupReader(kj::Own<Thread>&& thread, kj::Own<AsyncInputStream>&& input)
-      : thread(kj::mv(thread)), input(kj::mv(input)) {}
+  LookupReader(kj::Own<Thread>&& thread, kj::Own<AsyncInputStream>&& input,
+               _::NetworkFilter& filter)
+      : thread(kj::mv(thread)), input(kj::mv(input)), filter(filter) {}
 
   ~LookupReader() {
     if (thread) thread->detach();
@@ -694,7 +745,7 @@ public:
         thread = nullptr;
         // getaddrinfo()'s docs seem to say it will never return an empty list, but let's check
         // anyway.
-        KJ_REQUIRE(addresses.size() > 0, "DNS lookup returned no addresses.") { break; }
+        KJ_REQUIRE(addresses.size() > 0, "DNS lookup returned no permitted addresses.") { break; }
         return addresses.releaseAsArray();
       } else {
         // getaddrinfo() can return multiple copies of the same address for several reasons.
@@ -707,7 +758,9 @@ public:
         //
         // So we instead resort to de-duping results.
         if (alreadySeen.insert(current).second) {
-          addresses.add(current);
+          if (current.parseAllowedBy(filter)) {
+            addresses.add(current);
+          }
         }
         return read();
       }
@@ -717,6 +770,7 @@ public:
 private:
   kj::Own<Thread> thread;
   kj::Own<AsyncInputStream> input;
+  _::NetworkFilter& filter;
   SocketAddress current;
   kj::Vector<SocketAddress> addresses;
   std::set<SocketAddress> alreadySeen;
@@ -728,7 +782,8 @@ struct SocketAddress::LookupParams {
 };
 
 Promise<Array<SocketAddress>> SocketAddress::lookupHost(
-    LowLevelAsyncIoProvider& lowLevel, kj::String host, kj::String service, uint portHint) {
+    LowLevelAsyncIoProvider& lowLevel, kj::String host, kj::String service, uint portHint,
+    _::NetworkFilter& filter) {
   // This shitty function spawns a thread to run getaddrinfo().  Unfortunately, getaddrinfo() is
   // the only cross-platform DNS API and it is blocking.
   //
@@ -736,7 +791,7 @@ Promise<Array<SocketAddress>> SocketAddress::lookupHost(
   // - Not implemented in Wine.
   // - Doesn't seem compatible with I/O completion ports, in particular because it's not associated
   //   with a handle. Could signal completion as an APC instead, but that requires the IOCP code
-  //   to use GetQueuedCompletionStatusEx() which it doesn't right now becaues it's not available
+  //   to use GetQueuedCompletionStatusEx() which it doesn't right now because it's not available
   //   in Wine.
   // - Requires Unicode, for some reason. Only GetAddrInfoExW() supports async, according to the
   //   docs. Never mind that DNS itself is ASCII...
@@ -753,7 +808,7 @@ Promise<Array<SocketAddress>> SocketAddress::lookupHost(
   auto thread = heap<Thread>(kj::mvCapture(params, [outFd,portHint](LookupParams&& params) {
     KJ_DEFER(closesocket(outFd));
 
-    struct addrinfo* list;
+    addrinfo* list;
     int status = getaddrinfo(
         params.host == "*" ? nullptr : params.host.cStr(),
         params.service == nullptr ? nullptr : params.service.cStr(),
@@ -761,7 +816,7 @@ Promise<Array<SocketAddress>> SocketAddress::lookupHost(
     if (status == 0) {
       KJ_DEFER(freeaddrinfo(list));
 
-      struct addrinfo* cur = list;
+      addrinfo* cur = list;
       while (cur != nullptr) {
         if (params.service == nullptr) {
           switch (cur->ai_addr->sa_family) {
@@ -818,7 +873,7 @@ Promise<Array<SocketAddress>> SocketAddress::lookupHost(
     }
   }));
 
-  auto reader = heap<LookupReader>(kj::mv(thread), kj::mv(input));
+  auto reader = heap<LookupReader>(kj::mv(thread), kj::mv(input), filter);
   return reader->read().attach(kj::mv(reader));
 }
 
@@ -826,8 +881,9 @@ Promise<Array<SocketAddress>> SocketAddress::lookupHost(
 
 class FdConnectionReceiver final: public ConnectionReceiver, public OwnedFd {
 public:
-  FdConnectionReceiver(Win32EventPort& eventPort, SOCKET fd, uint flags)
-      : OwnedFd(fd, flags), eventPort(eventPort),
+  FdConnectionReceiver(Win32EventPort& eventPort, SOCKET fd,
+                       LowLevelAsyncIoProvider::NetworkFilter& filter, uint flags)
+      : OwnedFd(fd, flags), eventPort(eventPort), filter(filter),
         observer(eventPort.observeIo(reinterpret_cast<HANDLE>(fd))),
         address(SocketAddress::getLocalAddress(fd)) {
     // In order to accept asynchronously, we need the AcceptEx() function. Apparently, we have
@@ -858,8 +914,10 @@ public:
       }
     }
 
-    return op->onComplete().attach(kj::mv(scratch)).then(mvCapture(result,
-        [this](Own<AsyncIoStream> stream, Win32EventPort::IoResult ioResult) {
+    return op->onComplete().then(mvCapture(result, mvCapture(scratch,
+        [this,newFd]
+        (Array<byte> scratch, Own<AsyncIoStream> stream, Win32EventPort::IoResult ioResult)
+        -> Promise<Own<AsyncIoStream>> {
       if (ioResult.errorCode != ERROR_SUCCESS) {
         KJ_FAIL_WIN32("AcceptEx()", ioResult.errorCode) { break; }
       } else {
@@ -867,8 +925,19 @@ public:
         stream->setsockopt(SOL_SOCKET, SO_UPDATE_ACCEPT_CONTEXT,
                            reinterpret_cast<char*>(&me), sizeof(me));
       }
-      return kj::mv(stream);
-    }));
+
+      // Supposedly, AcceptEx() places the local and peer addresses into the buffer (which we've
+      // named `scratch`). However, the format in which it writes these is undocumented, and
+      // doesn't even match between native Windows and WINE. Apparently it is useless. I don't know
+      // why they require the buffer to have space for it in the first place. We'll need to call
+      // getpeername() to get the address.
+      auto addr = SocketAddress::getPeerAddress(newFd);
+      if (addr.allowedBy(filter)) {
+        return kj::mv(stream);
+      } else {
+        return accept();
+      }
+    })));
   }
 
   uint getPort() override {
@@ -885,9 +954,15 @@ public:
     KJ_WINSOCK(::setsockopt(fd, level, option,
                             reinterpret_cast<const char*>(value), length));
   }
+  void getsockname(struct sockaddr* addr, uint* length) override {
+    socklen_t socklen = *length;
+    KJ_WINSOCK(::getsockname(fd, addr, &socklen));
+    *length = socklen;
+  }
 
 public:
   Win32EventPort& eventPort;
+  LowLevelAsyncIoProvider::NetworkFilter& filter;
   Own<Win32EventPort::IoObserver> observer;
   LPFN_ACCEPTEX acceptEx = nullptr;
   SocketAddress address;
@@ -923,8 +998,9 @@ public:
       return kj::mv(result);
     }));
   }
-  Own<ConnectionReceiver> wrapListenSocketFd(SOCKET fd, uint flags = 0) override {
-    return heap<FdConnectionReceiver>(eventPort, fd, flags);
+  Own<ConnectionReceiver> wrapListenSocketFd(
+      SOCKET fd, NetworkFilter& filter, uint flags = 0) override {
+    return heap<FdConnectionReceiver>(eventPort, fd, filter, flags);
   }
 
   Timer& getTimer() override { return eventPort.getTimer(); }
@@ -941,12 +1017,14 @@ private:
 
 class NetworkAddressImpl final: public NetworkAddress {
 public:
-  NetworkAddressImpl(LowLevelAsyncIoProvider& lowLevel, Array<SocketAddress> addrs)
-      : lowLevel(lowLevel), addrs(kj::mv(addrs)) {}
+  NetworkAddressImpl(LowLevelAsyncIoProvider& lowLevel,
+                     LowLevelAsyncIoProvider::NetworkFilter& filter,
+                     Array<SocketAddress> addrs)
+      : lowLevel(lowLevel), filter(filter), addrs(kj::mv(addrs)) {}
 
   Promise<Own<AsyncIoStream>> connect() override {
     auto addrsCopy = heapArray(addrs.asPtr());
-    auto promise = connectImpl(lowLevel, addrsCopy);
+    auto promise = connectImpl(lowLevel, filter, addrsCopy);
     return promise.attach(kj::mv(addrsCopy));
   }
 
@@ -974,7 +1052,7 @@ public:
       KJ_WINSOCK(::listen(fd, SOMAXCONN));
     }
 
-    return lowLevel.wrapListenSocketFd(fd, NEW_FD_FLAGS);
+    return lowLevel.wrapListenSocketFd(fd, filter, NEW_FD_FLAGS);
   }
 
   Own<DatagramPort> bindDatagramPort() override {
@@ -998,11 +1076,11 @@ public:
       addrs[0].bind(fd);
     }
 
-    return lowLevel.wrapDatagramSocketFd(fd, NEW_FD_FLAGS);
+    return lowLevel.wrapDatagramSocketFd(fd, filter, NEW_FD_FLAGS);
   }
 
   Own<NetworkAddress> clone() override {
-    return kj::heap<NetworkAddressImpl>(lowLevel, kj::heapArray(addrs.asPtr()));
+    return kj::heap<NetworkAddressImpl>(lowLevel, filter, kj::heapArray(addrs.asPtr()));
   }
 
   String toString() override {
@@ -1016,26 +1094,34 @@ public:
 
 private:
   LowLevelAsyncIoProvider& lowLevel;
+  LowLevelAsyncIoProvider::NetworkFilter& filter;
   Array<SocketAddress> addrs;
   uint counter = 0;
 
   static Promise<Own<AsyncIoStream>> connectImpl(
-      LowLevelAsyncIoProvider& lowLevel, ArrayPtr<SocketAddress> addrs) {
+      LowLevelAsyncIoProvider& lowLevel,
+      LowLevelAsyncIoProvider::NetworkFilter& filter,
+      ArrayPtr<SocketAddress> addrs) {
     KJ_ASSERT(addrs.size() > 0);
 
     int fd = addrs[0].socket(SOCK_STREAM);
 
-    return kj::evalNow([&]() {
-      return lowLevel.wrapConnectingSocketFd(
-          fd, addrs[0].getRaw(), addrs[0].getRawSize(), NEW_FD_FLAGS);
+    return kj::evalNow([&]() -> Promise<Own<AsyncIoStream>> {
+      if (!addrs[0].allowedBy(filter)) {
+        return KJ_EXCEPTION(FAILED, "connect() blocked by restrictPeers()");
+      } else {
+        return lowLevel.wrapConnectingSocketFd(
+            fd, addrs[0].getRaw(), addrs[0].getRawSize(), NEW_FD_FLAGS);
+      }
     }).then([](Own<AsyncIoStream>&& stream) -> Promise<Own<AsyncIoStream>> {
       // Success, pass along.
       return kj::mv(stream);
-    }, [&lowLevel,KJ_CPCAP(addrs)](Exception&& exception) mutable -> Promise<Own<AsyncIoStream>> {
+    }, [&lowLevel,&filter,KJ_CPCAP(addrs)](Exception&& exception) mutable
+        -> Promise<Own<AsyncIoStream>> {
       // Connect failed.
       if (addrs.size() > 1) {
         // Try the next address instead.
-        return connectImpl(lowLevel, addrs.slice(1, addrs.size()));
+        return connectImpl(lowLevel, filter, addrs.slice(1, addrs.size()));
       } else {
         // No more addresses to try, so propagate the exception.
         return kj::mv(exception);
@@ -1047,25 +1133,35 @@ private:
 class SocketNetwork final: public Network {
 public:
   explicit SocketNetwork(LowLevelAsyncIoProvider& lowLevel): lowLevel(lowLevel) {}
+  explicit SocketNetwork(SocketNetwork& parent,
+                         kj::ArrayPtr<const kj::StringPtr> allow,
+                         kj::ArrayPtr<const kj::StringPtr> deny)
+      : lowLevel(parent.lowLevel), filter(allow, deny, parent.filter) {}
 
   Promise<Own<NetworkAddress>> parseAddress(StringPtr addr, uint portHint = 0) override {
-    auto& lowLevelCopy = lowLevel;
-    return evalLater(mvCapture(heapString(addr),
-        [&lowLevelCopy,portHint](String&& addr) {
-      return SocketAddress::parse(lowLevelCopy, addr, portHint);
-    })).then([&lowLevelCopy](Array<SocketAddress> addresses) -> Own<NetworkAddress> {
-      return heap<NetworkAddressImpl>(lowLevelCopy, kj::mv(addresses));
+    return evalLater(mvCapture(heapString(addr), [this,portHint](String&& addr) {
+      return SocketAddress::parse(lowLevel, addr, portHint, filter);
+    })).then([this](Array<SocketAddress> addresses) -> Own<NetworkAddress> {
+      return heap<NetworkAddressImpl>(lowLevel, filter, kj::mv(addresses));
     });
   }
 
   Own<NetworkAddress> getSockaddr(const void* sockaddr, uint len) override {
     auto array = kj::heapArrayBuilder<SocketAddress>(1);
     array.add(SocketAddress(sockaddr, len));
-    return Own<NetworkAddress>(heap<NetworkAddressImpl>(lowLevel, array.finish()));
+    KJ_REQUIRE(array[0].allowedBy(filter), "address blocked by restrictPeers()") { break; }
+    return Own<NetworkAddress>(heap<NetworkAddressImpl>(lowLevel, filter, array.finish()));
+  }
+
+  Own<Network> restrictPeers(
+      kj::ArrayPtr<const kj::StringPtr> allow,
+      kj::ArrayPtr<const kj::StringPtr> deny = nullptr) override {
+    return heap<SocketNetwork>(*this, allow, deny);
   }
 
 private:
   LowLevelAsyncIoProvider& lowLevel;
+  _::NetworkFilter filter;
 };
 
 // =======================================================================================

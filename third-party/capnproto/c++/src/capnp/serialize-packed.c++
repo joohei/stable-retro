@@ -140,7 +140,7 @@ size_t PackedInputStream::tryRead(void* dst, size_t minBytes, size_t maxBytes) {
         return out - reinterpret_cast<uint8_t*>(dst);
       }
 
-      uint inRemaining = BUFFER_REMAINING;
+      size_t inRemaining = BUFFER_REMAINING;
       if (inRemaining >= runLength) {
         // Fast path.
         memcpy(out, in, runLength);
@@ -266,7 +266,7 @@ void PackedInputStream::skip(size_t bytes) {
 
       bytes -= runLength;
 
-      uint inRemaining = BUFFER_REMAINING;
+      size_t inRemaining = BUFFER_REMAINING;
       if (inRemaining > runLength) {
         // Fast path.
         in += runLength;
@@ -351,7 +351,8 @@ void PackedOutputStream::write(const void* src, size_t size) {
       // An all-zero word is followed by a count of consecutive zero words (not including the
       // first one).
 
-      // We can check a whole word at a time.
+      // We can check a whole word at a time. (Here is where we use the assumption that
+      // `src` is word-aligned.)
       const uint64_t* inWord = reinterpret_cast<const uint64_t*>(in);
 
       // The count must fit it 1 byte, so limit to 255 words.

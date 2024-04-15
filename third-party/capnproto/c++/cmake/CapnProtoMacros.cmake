@@ -3,19 +3,19 @@
 # Example usage:
 #   find_package(CapnProto)
 #   capnp_generate_cpp(CAPNP_SRCS CAPNP_HDRS schema.capnp)
-#   include_directories(${CMAKE_CURRENT_BINARY_DIR})
 #   add_executable(foo main.cpp ${CAPNP_SRCS})
-#   target_link_libraries(foo CapnProto::capnp-rpc)
+#   target_link_libraries(foo PRIVATE CapnProto::capnp-rpc)
+#   target_include_directories(foo PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
 #
-#  If you are using not using the RPC features you can use
-#  'CapnProto::capnp' in target_link_libraries call
+#  If you are not using the RPC features you can use 'CapnProto::capnp' in the
+#  target_link_libraries call
 #
 # Configuration variables (optional):
 #   CAPNPC_OUTPUT_DIR
 #       Directory to place compiled schema sources (default: CMAKE_CURRENT_BINARY_DIR).
 #   CAPNPC_IMPORT_DIRS
 #       List of additional include directories for the schema compiler.
-#       (CMAKE_CURRENT_SOURCE_DIR and CAPNP_INCLUDE_DIRECTORY are always included.)
+#       (CAPNPC_SRC_PREFIX and CAPNP_INCLUDE_DIRECTORY are always included.)
 #   CAPNPC_SRC_PREFIX
 #       Schema file source prefix (default: CMAKE_CURRENT_SOURCE_DIR).
 #   CAPNPC_FLAGS
@@ -30,9 +30,15 @@ function(CAPNP_GENERATE_CPP SOURCES HEADERS)
   set(tool_depends ${EMPTY_STRING})
   #Use cmake targets available
   if(TARGET capnp_tool)
-    set(CAPNP_EXECUTABLE capnp_tool)
-    GET_TARGET_PROPERTY(CAPNPC_CXX_EXECUTABLE capnpc_cpp CAPNPC_CXX_EXECUTABLE)
-    GET_TARGET_PROPERTY(CAPNP_INCLUDE_DIRECTORY capnp_tool CAPNP_INCLUDE_DIRECTORY)
+    if(NOT CAPNP_EXECUTABLE)
+      set(CAPNP_EXECUTABLE $<TARGET_FILE:capnp_tool>)
+    endif()
+    if(NOT CAPNPC_CXX_EXECUTABLE)
+      get_target_property(CAPNPC_CXX_EXECUTABLE capnpc_cpp CAPNPC_CXX_EXECUTABLE)
+    endif()
+    if(NOT CAPNP_INCLUDE_DIRECTORY)
+      get_target_property(CAPNP_INCLUDE_DIRECTORY capnp_tool CAPNP_INCLUDE_DIRECTORY)
+    endif()
     list(APPEND tool_depends capnp_tool capnpc_cpp)
   endif()
   if(NOT CAPNP_EXECUTABLE)
@@ -43,17 +49,6 @@ function(CAPNP_GENERATE_CPP SOURCES HEADERS)
   endif()
   if(NOT CAPNP_INCLUDE_DIRECTORY)
     message(SEND_ERROR "Could not locate capnp header files (CAPNP_INCLUDE_DIRECTORY).")
-  endif()
-
-  # Default compiler includes
-  set(include_path -I ${CMAKE_CURRENT_SOURCE_DIR} -I ${CAPNP_INCLUDE_DIRECTORY})
-
-  if(DEFINED CAPNPC_IMPORT_DIRS)
-    # Append each directory as a series of '-I' flags in ${include_path}
-    foreach(directory ${CAPNPC_IMPORT_DIRS})
-      get_filename_component(absolute_path "${directory}" ABSOLUTE)
-      list(APPEND include_path -I ${absolute_path})
-    endforeach()
   endif()
 
   if(DEFINED CAPNPC_OUTPUT_DIR)
@@ -68,14 +63,30 @@ function(CAPNP_GENERATE_CPP SOURCES HEADERS)
   endif()
   get_filename_component(CAPNPC_SRC_PREFIX "${CAPNPC_SRC_PREFIX}" ABSOLUTE)
 
+  # Default compiler includes. Note that in capnp's own test usage of capnp_generate_cpp(), these
+  # two variables will end up evaluating to the same directory. However, it's difficult to
+  # deduplicate them because if CAPNP_INCLUDE_DIRECTORY came from the capnp_tool target property,
+  # then it must be a generator expression in order to handle usages in both the build tree and the
+  # install tree. This vastly overcomplicates duplication detection, so the duplication doesn't seem
+  # worth fixing.
+  set(include_path -I "${CAPNPC_SRC_PREFIX}" -I "${CAPNP_INCLUDE_DIRECTORY}")
+
+  if(DEFINED CAPNPC_IMPORT_DIRS)
+    # Append each directory as a series of '-I' flags in ${include_path}
+    foreach(directory ${CAPNPC_IMPORT_DIRS})
+      get_filename_component(absolute_path "${directory}" ABSOLUTE)
+      list(APPEND include_path -I "${absolute_path}")
+    endforeach()
+  endif()
+
   set(${SOURCES})
   set(${HEADERS})
   foreach(schema_file ${ARGN})
-    if(NOT EXISTS "${CAPNPC_SRC_PREFIX}/${schema_file}")
-      message(FATAL_ERROR "Cap'n Proto schema file '${CAPNPC_SRC_PREFIX}/${schema_file}' does not exist!")
-    endif()
     get_filename_component(file_path "${schema_file}" ABSOLUTE)
     get_filename_component(file_dir "${file_path}" PATH)
+    if(NOT EXISTS "${file_path}")
+      message(FATAL_ERROR "Cap'n Proto schema file '${file_path}' does not exist!")
+    endif()
 
     # Figure out where the output files will go
     if (NOT DEFINED CAPNPC_OUTPUT_DIR)

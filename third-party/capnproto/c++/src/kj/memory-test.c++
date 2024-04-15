@@ -65,6 +65,336 @@ TEST(Memory, AssignNested) {
   EXPECT_TRUE(destroyed1 && destroyed2);
 }
 
+struct DestructionOrderRecorder {
+  DestructionOrderRecorder(uint& counter, uint& recordTo)
+      : counter(counter), recordTo(recordTo) {}
+  ~DestructionOrderRecorder() {
+    recordTo = ++counter;
+  }
+
+  uint& counter;
+  uint& recordTo;
+};
+
+TEST(Memory, Attach) {
+  uint counter = 0;
+  uint destroyed1 = 0;
+  uint destroyed2 = 0;
+  uint destroyed3 = 0;
+
+  auto obj1 = kj::heap<DestructionOrderRecorder>(counter, destroyed1);
+  auto obj2 = kj::heap<DestructionOrderRecorder>(counter, destroyed2);
+  auto obj3 = kj::heap<DestructionOrderRecorder>(counter, destroyed3);
+
+  auto ptr = obj1.get();
+
+  Own<DestructionOrderRecorder> combined = obj1.attach(kj::mv(obj2), kj::mv(obj3));
+
+  KJ_EXPECT(combined.get() == ptr);
+
+  KJ_EXPECT(obj1.get() == nullptr);
+  KJ_EXPECT(obj2.get() == nullptr);
+  KJ_EXPECT(obj3.get() == nullptr);
+  KJ_EXPECT(destroyed1 == 0);
+  KJ_EXPECT(destroyed2 == 0);
+  KJ_EXPECT(destroyed3 == 0);
+
+  combined = nullptr;
+
+  KJ_EXPECT(destroyed1 == 1, destroyed1);
+  KJ_EXPECT(destroyed2 == 2, destroyed2);
+  KJ_EXPECT(destroyed3 == 3, destroyed3);
+}
+
+TEST(Memory, AttachNested) {
+  uint counter = 0;
+  uint destroyed1 = 0;
+  uint destroyed2 = 0;
+  uint destroyed3 = 0;
+
+  auto obj1 = kj::heap<DestructionOrderRecorder>(counter, destroyed1);
+  auto obj2 = kj::heap<DestructionOrderRecorder>(counter, destroyed2);
+  auto obj3 = kj::heap<DestructionOrderRecorder>(counter, destroyed3);
+
+  auto ptr = obj1.get();
+
+  Own<DestructionOrderRecorder> combined = obj1.attach(kj::mv(obj2)).attach(kj::mv(obj3));
+
+  KJ_EXPECT(combined.get() == ptr);
+
+  KJ_EXPECT(obj1.get() == nullptr);
+  KJ_EXPECT(obj2.get() == nullptr);
+  KJ_EXPECT(obj3.get() == nullptr);
+  KJ_EXPECT(destroyed1 == 0);
+  KJ_EXPECT(destroyed2 == 0);
+  KJ_EXPECT(destroyed3 == 0);
+
+  combined = nullptr;
+
+  KJ_EXPECT(destroyed1 == 1, destroyed1);
+  KJ_EXPECT(destroyed2 == 2, destroyed2);
+  KJ_EXPECT(destroyed3 == 3, destroyed3);
+}
+
+KJ_TEST("attachRef") {
+  uint counter = 0;
+  uint destroyed1 = 0;
+  uint destroyed2 = 0;
+  uint destroyed3 = 0;
+
+  auto obj1 = kj::heap<DestructionOrderRecorder>(counter, destroyed1);
+  auto obj2 = kj::heap<DestructionOrderRecorder>(counter, destroyed2);
+  auto obj3 = kj::heap<DestructionOrderRecorder>(counter, destroyed3);
+
+  int i = 123;
+
+  Own<int> combined = attachRef(i, kj::mv(obj1), kj::mv(obj2), kj::mv(obj3));
+
+  KJ_EXPECT(combined.get() == &i);
+
+  KJ_EXPECT(obj1.get() == nullptr);
+  KJ_EXPECT(obj2.get() == nullptr);
+  KJ_EXPECT(obj3.get() == nullptr);
+  KJ_EXPECT(destroyed1 == 0);
+  KJ_EXPECT(destroyed2 == 0);
+  KJ_EXPECT(destroyed3 == 0);
+
+  combined = nullptr;
+
+  KJ_EXPECT(destroyed1 == 1, destroyed1);
+  KJ_EXPECT(destroyed2 == 2, destroyed2);
+  KJ_EXPECT(destroyed3 == 3, destroyed3);
+}
+
+KJ_TEST("attachVal") {
+  uint counter = 0;
+  uint destroyed1 = 0;
+  uint destroyed2 = 0;
+  uint destroyed3 = 0;
+
+  auto obj1 = kj::heap<DestructionOrderRecorder>(counter, destroyed1);
+  auto obj2 = kj::heap<DestructionOrderRecorder>(counter, destroyed2);
+  auto obj3 = kj::heap<DestructionOrderRecorder>(counter, destroyed3);
+
+  int i = 123;
+
+  Own<int> combined = attachVal(i, kj::mv(obj1), kj::mv(obj2), kj::mv(obj3));
+
+  int* ptr = combined.get();
+  KJ_EXPECT(ptr != &i);
+  KJ_EXPECT(*ptr == i);
+
+  KJ_EXPECT(obj1.get() == nullptr);
+  KJ_EXPECT(obj2.get() == nullptr);
+  KJ_EXPECT(obj3.get() == nullptr);
+  KJ_EXPECT(destroyed1 == 0);
+  KJ_EXPECT(destroyed2 == 0);
+  KJ_EXPECT(destroyed3 == 0);
+
+  combined = nullptr;
+
+  KJ_EXPECT(destroyed1 == 1, destroyed1);
+  KJ_EXPECT(destroyed2 == 2, destroyed2);
+  KJ_EXPECT(destroyed3 == 3, destroyed3);
+}
+
+struct StaticType {
+  int i;
+};
+
+struct DynamicType1 {
+  virtual void foo() {}
+
+  int j;
+
+  DynamicType1(int j): j(j) {}
+};
+
+struct DynamicType2 {
+  virtual void bar() {}
+
+  int k;
+
+  DynamicType2(int k): k(k) {}
+};
+
+struct SingularDerivedDynamic final: public DynamicType1 {
+  SingularDerivedDynamic(int j, bool& destructorCalled)
+      : DynamicType1(j), destructorCalled(destructorCalled) {}
+
+  ~SingularDerivedDynamic() {
+    destructorCalled = true;
+  }
+  KJ_DISALLOW_COPY(SingularDerivedDynamic);
+
+  bool& destructorCalled;
+};
+
+struct MultipleDerivedDynamic final: public DynamicType1, public DynamicType2 {
+  MultipleDerivedDynamic(int j, int k, bool& destructorCalled)
+      : DynamicType1(j), DynamicType2(k), destructorCalled(destructorCalled) {}
+
+  ~MultipleDerivedDynamic() {
+    destructorCalled = true;
+  }
+
+  KJ_DISALLOW_COPY(MultipleDerivedDynamic);
+
+  bool& destructorCalled;
+};
+
+TEST(Memory, OwnVoid) {
+  {
+    Own<StaticType> ptr = heap<StaticType>({123});
+    StaticType* addr = ptr.get();
+    Own<void> voidPtr = kj::mv(ptr);
+    KJ_EXPECT(voidPtr.get() == implicitCast<void*>(addr));
+  }
+
+  {
+    bool destructorCalled = false;
+    Own<SingularDerivedDynamic> ptr = heap<SingularDerivedDynamic>(123, destructorCalled);
+    SingularDerivedDynamic* addr = ptr.get();
+    Own<void> voidPtr = kj::mv(ptr);
+    KJ_EXPECT(voidPtr.get() == implicitCast<void*>(addr));
+  }
+
+  {
+    bool destructorCalled = false;
+    Own<MultipleDerivedDynamic> ptr = heap<MultipleDerivedDynamic>(123, 456, destructorCalled);
+    MultipleDerivedDynamic* addr = ptr.get();
+    Own<void> voidPtr = kj::mv(ptr);
+    KJ_EXPECT(voidPtr.get() == implicitCast<void*>(addr));
+
+    KJ_EXPECT(!destructorCalled);
+    voidPtr = nullptr;
+    KJ_EXPECT(destructorCalled);
+  }
+
+  {
+    bool destructorCalled = false;
+    Own<MultipleDerivedDynamic> ptr = heap<MultipleDerivedDynamic>(123, 456, destructorCalled);
+    MultipleDerivedDynamic* addr = ptr.get();
+    Own<DynamicType2> basePtr = kj::mv(ptr);
+    DynamicType2* baseAddr = basePtr.get();
+
+    // On most (all?) C++ ABIs, the second base class in a multiply-inherited class is offset from
+    // the beginning of the object (assuming the first base class has non-zero size). We use this
+    // fact here to verify that then casting to Own<void> does in fact result in a pointer that
+    // points to the start of the overall object, not the base class. We expect that the pointers
+    // are different here to prove that the test below is non-trivial.
+    //
+    // If there is some other ABI where these pointers are the same, and thus this expectation
+    // fails, then it's no problem to #ifdef out the expectation on that platform.
+    KJ_EXPECT(static_cast<void*>(baseAddr) != static_cast<void*>(addr));
+
+    Own<void> voidPtr = kj::mv(basePtr);
+    KJ_EXPECT(voidPtr.get() == static_cast<void*>(addr));
+
+    KJ_EXPECT(!destructorCalled);
+    voidPtr = nullptr;
+    KJ_EXPECT(destructorCalled);
+  }
+}
+
+TEST(Memory, OwnConstVoid) {
+  {
+    Own<StaticType> ptr = heap<StaticType>({123});
+    StaticType* addr = ptr.get();
+    Own<const void> voidPtr = kj::mv(ptr);
+    KJ_EXPECT(voidPtr.get() == implicitCast<void*>(addr));
+  }
+
+  {
+    bool destructorCalled = false;
+    Own<SingularDerivedDynamic> ptr = heap<SingularDerivedDynamic>(123, destructorCalled);
+    SingularDerivedDynamic* addr = ptr.get();
+    Own<const void> voidPtr = kj::mv(ptr);
+    KJ_EXPECT(voidPtr.get() == implicitCast<void*>(addr));
+  }
+
+  {
+    bool destructorCalled = false;
+    Own<MultipleDerivedDynamic> ptr = heap<MultipleDerivedDynamic>(123, 456, destructorCalled);
+    MultipleDerivedDynamic* addr = ptr.get();
+    Own<const void> voidPtr = kj::mv(ptr);
+    KJ_EXPECT(voidPtr.get() == implicitCast<void*>(addr));
+
+    KJ_EXPECT(!destructorCalled);
+    voidPtr = nullptr;
+    KJ_EXPECT(destructorCalled);
+  }
+
+  {
+    bool destructorCalled = false;
+    Own<MultipleDerivedDynamic> ptr = heap<MultipleDerivedDynamic>(123, 456, destructorCalled);
+    MultipleDerivedDynamic* addr = ptr.get();
+    Own<DynamicType2> basePtr = kj::mv(ptr);
+    DynamicType2* baseAddr = basePtr.get();
+
+    // On most (all?) C++ ABIs, the second base class in a multiply-inherited class is offset from
+    // the beginning of the object (assuming the first base class has non-zero size). We use this
+    // fact here to verify that then casting to Own<void> does in fact result in a pointer that
+    // points to the start of the overall object, not the base class. We expect that the pointers
+    // are different here to prove that the test below is non-trivial.
+    //
+    // If there is some other ABI where these pointers are the same, and thus this expectation
+    // fails, then it's no problem to #ifdef out the expectation on that platform.
+    KJ_EXPECT(static_cast<void*>(baseAddr) != static_cast<void*>(addr));
+
+    Own<const void> voidPtr = kj::mv(basePtr);
+    KJ_EXPECT(voidPtr.get() == static_cast<void*>(addr));
+
+    KJ_EXPECT(!destructorCalled);
+    voidPtr = nullptr;
+    KJ_EXPECT(destructorCalled);
+  }
+}
+
+struct IncompleteType;
+KJ_DECLARE_NON_POLYMORPHIC(IncompleteType)
+
+template <typename T, typename U>
+struct IncompleteTemplate;
+template <typename T, typename U>
+KJ_DECLARE_NON_POLYMORPHIC(IncompleteTemplate<T, U>)
+
+struct IncompleteDisposer: public Disposer {
+  mutable void* sawPtr = nullptr;
+
+  virtual void disposeImpl(void* pointer) const {
+    sawPtr = pointer;
+  }
+};
+
+KJ_TEST("Own<IncompleteType>") {
+  static int i;
+  void* ptr = &i;
+
+  {
+    IncompleteDisposer disposer;
+
+    {
+      kj::Own<IncompleteType> foo(reinterpret_cast<IncompleteType*>(ptr), disposer);
+      kj::Own<IncompleteType> bar = kj::mv(foo);
+    }
+
+    KJ_EXPECT(disposer.sawPtr == ptr);
+  }
+
+  {
+    IncompleteDisposer disposer;
+
+    {
+      kj::Own<IncompleteTemplate<int, char>> foo(
+          reinterpret_cast<IncompleteTemplate<int, char>*>(ptr), disposer);
+      kj::Own<IncompleteTemplate<int, char>> bar = kj::mv(foo);
+    }
+
+    KJ_EXPECT(disposer.sawPtr == ptr);
+  }
+}
+
 // TODO(test):  More tests.
 
 }  // namespace

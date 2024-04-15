@@ -3,10 +3,10 @@
 
 /*
   getopt.h -- header for getopt() replacement function
-  Copyright (C) 1999-2011 Dieter Baron and Thomas Klausner
+  Copyright (C) 1999-2021 Dieter Baron and Thomas Klausner
 
   This file is part of libzip, a library to manipulate ZIP archives.
-  The authors can be contacted at <libzip@nih.at>
+  The authors can be contacted at <info@libzip.org>
 
   Redistribution and use in source and binary forms, with or without
   modification, are permitted provided that the following conditions
@@ -42,7 +42,7 @@ extern char *optarg;
 extern int optind;
 extern int opterr;
 
-extern int getopt(int, char * const *, const char *);
+extern int getopt(int, char *const *, const char *);
 
 #ifdef __cplusplus
 }

@@ -138,11 +138,11 @@ struct Person {
   # ...
 
   employment :union {
+    # We assume that a person is only one of these.
     unemployed @4 :Void;
     employer @5 :Company;
     school @6 :School;
     selfEmployed @7 :Void;
-    # We assume that a person is only one of these.
   }
 }
 {% endhighlight %}
@@ -222,9 +222,9 @@ A group is a set of fields that are encapsulated in their own scope.
 struct Person {
   # ...
 
-  # Note:  This is a terrible way to use groups, and meant
-  #   only to demonstrate the syntax.
   address :group {
+    # Note:  This is a terrible way to use groups, and meant
+    #        only to demonstrate the syntax.
     houseNumber @8 :UInt32;
     street @9 :Text;
     city @10 :Text;
@@ -393,7 +393,7 @@ Cap'n Proto generics work very similarly to Java generics or C++ templates. Some
   a type is wire-compatible with any specific parameterization, so long as you interpret the
   `AnyPointer`s as the correct type at runtime.
 
-* Relatedly, it is safe to cast an generic interface of a specific parameterization to a generic
+* Relatedly, it is safe to cast a generic interface of a specific parameterization to a generic
   interface where all parameters are `AnyPointer` and vice versa, as long as the `AnyPointer`s are
   treated as the correct type at runtime. This means that e.g. you can implement a server in a
   generic way that is correct for all parameterizations but call it from clients using a specific
@@ -403,17 +403,27 @@ Cap'n Proto generics work very similarly to Java generics or C++ templates. Some
   substituting the type parameters manually. For example, `Map(Text, Person)` is encoded exactly
   the same as:
 
-  <div>{% highlight capnp %}
-  struct PersonMap {
-    # Encoded the same as Map(Text, Person).
-    entries @0 :List(Entry);
-    struct Entry {
-      key @0 :Text;
-      value @1 :Person;
+  <figure class="highlight"><pre><code class="language-capnp" data-lang="capnp"><span></span><span class="k">struct</span> <span class="n">PersonMap</span> {
+    <span class="c1"># Encoded the same as Map(Text, Person).</span>
+    <span class="n">entries</span> <span class="nd">@0</span> <span class="nc">:List(Entry)</span>;
+    <span class="k">struct</span> <span class="n">Entry</span> {
+      <span class="n">key</span> <span class="nd">@0</span> <span class="nc">:Text</span>;
+      <span class="n">value</span> <span class="nd">@1</span> <span class="nc">:Person</span>;
     }
-  }
-  {% endhighlight %}
-  </div>
+  }</code></pre></figure>
+
+  {% comment %}
+  Highlighter manually invoked because of: https://github.com/jekyll/jekyll/issues/588
+  Original code was:
+    struct PersonMap {
+      # Encoded the same as Map(Text, Person).
+      entries @0 :List(Entry);
+      struct Entry {
+        key @0 :Text;
+        value @1 :Person;
+      }
+    }
+  {% endcomment %}
 
   Therefore, it is possible to upgrade non-generic types to generic types while retaining
   backwards-compatibility.
@@ -542,8 +552,8 @@ An `import` expression names the scope of some other file:
 
 {% highlight capnp %}
 struct Foo {
-  # Use type "Baz" defined in bar.capnp.
   baz @0 :import "bar.capnp".Baz;
+  # Use type "Baz" defined in bar.capnp.
 }
 {% endhighlight %}
 
@@ -553,8 +563,8 @@ Of course, typically it's more readable to define an alias:
 using Bar = import "bar.capnp";
 
 struct Foo {
-  # Use type "Baz" defined in bar.capnp.
   baz @0 :Bar.Baz;
+  # Use type "Baz" defined in bar.capnp.
 }
 {% endhighlight %}
 
@@ -565,12 +575,15 @@ using import "bar.capnp".Baz;
 
 struct Foo {
   baz @0 :Baz;
+  # Use type "Baz" defined in bar.capnp.
 }
 {% endhighlight %}
 
 The above imports specify relative paths.  If the path begins with a `/`, it is absolute -- in
 this case, the `capnp` tool searches for the file in each of the search path directories specified
-with `-I`.
+with `-I`, appending the path you specify to the path given to the `-I` flag. So, for example,
+if you ran `capnp` with `-Ifoo/bar`, and the import statement is `import "/baz/qux.capnp"`, then
+the compiler would open the file `foo/bar/baz/qux.capnp`.
 
 ### Annotations
 
@@ -584,22 +597,23 @@ removes all of these hidden fields.
 You may declare annotations and use them like so:
 
 {% highlight capnp %}
-# Declare an annotation 'foo' which applies to struct and enum types.
 annotation foo(struct, enum) :Text;
+# Declare an annotation 'foo' which applies to struct and enum types.
 
-# Apply 'foo' to to MyType.
 struct MyType $foo("bar") {
+  # Apply 'foo' to to MyType.
+
   # ...
 }
 {% endhighlight %}
 
-The possible targets for an annotation are: `file`, `struct`, `field`, `union`, `enum`, `enumerant`,
-`interface`, `method`, `parameter`, `annotation`, `const`.  You may also specify `*` to cover them
-all.
+The possible targets for an annotation are: `file`, `struct`, `field`, `union`, `group`, `enum`,
+`enumerant`, `interface`, `method`, `param`, `annotation`, `const`.
+You may also specify `*` to cover them all.
 
 {% highlight capnp %}
-# 'baz' can annotate anything!
 annotation baz(*) :Int32;
+# 'baz' can annotate anything!
 
 $baz(1);  # Annotate the file.
 
@@ -654,8 +668,8 @@ A Cap'n Proto file must have a unique 64-bit ID, and each type and annotation de
 also have an ID.  Use `capnp id` to generate a new ID randomly.  ID specifications begin with `@`:
 
 {% highlight capnp %}
-# file ID
 @0xdbb9ad1f14bf0b36;
+# file ID
 
 struct Foo @0x8db435604d0d3723 {
   # ...
@@ -731,29 +745,47 @@ without changing the [canonical](encoding.html#canonicalization) encoding of a m
   be replaced with the new generic parameter so long as all existing users of the type are updated
   to bind that generic parameter to the type it replaced. For example:
 
-  <div>{% highlight capnp %}
-  struct Map {
-    entries @0 :List(Entry);
-    struct Entry {
-      key @0 :Text;
-      value @1 :Text;
+  <figure class="highlight"><pre><code class="language-capnp" data-lang="capnp"><span></span><span class="k">struct</span> <span class="n">Map</span> {
+    <span class="n">entries</span> <span class="nd">@0</span> <span class="nc">:List(Entry)</span>;
+    <span class="k">struct</span> <span class="n">Entry</span> {
+      <span class="n">key</span> <span class="nd">@0</span> <span class="nc">:Text</span>;
+      <span class="n">value</span> <span class="nd">@1</span> <span class="nc">:Text</span>;
     }
-  }
-  {% endhighlight %}
-  </div>
+  }</code></pre></figure>
+
+  {% comment %}
+  Highlighter manually invoked because of: https://github.com/jekyll/jekyll/issues/588
+  Original code was:
+    struct Map {
+      entries @0 :List(Entry);
+      struct Entry {
+        key @0 :Text;
+        value @1 :Text;
+      }
+    }
+  {% endcomment %}
 
   Can change to:
 
-  <div>{% highlight capnp %}
-  struct Map(Key, Value) {
-    entries @0 :List(Entry);
-    struct Entry {
-      key @0 :Key;
-      value @1 :Value;
+  <figure class="highlight"><pre><code class="language-capnp" data-lang="capnp"><span></span><span class="k">struct</span> <span class="n">Map</span>(<span class="n">Key</span>, <span class="n">Value</span>) {
+    <span class="n">entries</span> <span class="nd">@0</span> <span class="nc">:List(Entry)</span>;
+    <span class="k">struct</span> <span class="n">Entry</span> {
+      <span class="n">key</span> <span class="nd">@0</span> <span class="nc">:Key</span>;
+      <span class="n">value</span> <span class="nd">@1</span> <span class="nc">:Value</span>;
     }
-  }
-  {% endhighlight %}
-  </div>
+  }</code></pre></figure>
+
+  {% comment %}
+  Highlighter manually invoked because of: https://github.com/jekyll/jekyll/issues/588
+  Original code was:
+    struct Map(Key, Value) {
+      entries @0 :List(Entry);
+      struct Entry {
+        key @0 :Key;
+        value @1 :Value;
+      }
+    }
+  {% endcomment %}
 
   As long as all existing uses of `Map` are replaced with `Map(Text, Text)` (and any uses of
   `Map.Entry` are replaced with `Map(Text, Text).Entry`).

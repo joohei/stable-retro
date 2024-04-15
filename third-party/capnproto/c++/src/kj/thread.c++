@@ -34,7 +34,7 @@ namespace kj {
 
 #if _WIN32
 
-Thread::Thread(Function<void()> func): state(new ThreadState { kj::mv(func), nullptr, 2 }) {
+Thread::Thread(Function<void()> func): state(new ThreadState(kj::mv(func))) {
   threadHandle = CreateThread(nullptr, 0, &runThread, state, 0, nullptr);
   if (threadHandle == nullptr) {
     state->unref();
@@ -61,20 +61,9 @@ void Thread::detach() {
   detached = true;
 }
 
-DWORD Thread::runThread(void* ptr) {
-  ThreadState* state = reinterpret_cast<ThreadState*>(ptr);
-  KJ_IF_MAYBE(exception, kj::runCatchingExceptions([&]() {
-    state->func();
-  })) {
-    state->exception = kj::mv(*exception);
-  }
-  state->unref();
-  return 0;
-}
-
 #else  // _WIN32
 
-Thread::Thread(Function<void()> func): state(new ThreadState { kj::mv(func), nullptr, 2 }) {
+Thread::Thread(Function<void()> func): state(new ThreadState(kj::mv(func))) {
   static_assert(sizeof(threadId) >= sizeof(pthread_t),
                 "pthread_t is larger than a long long on your platform.  Please port.");
 
@@ -119,21 +108,16 @@ void Thread::detach() {
   state->unref();
 }
 
-void* Thread::runThread(void* ptr) {
-  ThreadState* state = reinterpret_cast<ThreadState*>(ptr);
-  KJ_IF_MAYBE(exception, kj::runCatchingExceptions([&]() {
-    state->func();
-  })) {
-    state->exception = kj::mv(*exception);
-  }
-  state->unref();
-  return nullptr;
-}
-
 #endif  // _WIN32, else
 
+Thread::ThreadState::ThreadState(Function<void()> func)
+    : func(kj::mv(func)),
+      initializer(getExceptionCallback().getThreadInitializer()),
+      exception(nullptr),
+      refcount(2) {}
+
 void Thread::ThreadState::unref() {
-#if _MSC_VER
+#if _MSC_VER && !defined(__clang__)
   if (_InterlockedDecrement(&refcount) == 0) {
 #else
   if (__atomic_sub_fetch(&refcount, 1, __ATOMIC_RELEASE) == 0) {
@@ -141,11 +125,33 @@ void Thread::ThreadState::unref() {
 #endif
 
     KJ_IF_MAYBE(e, exception) {
-      KJ_LOG(ERROR, "uncaught exception thrown by detached thread", *e);
+      // If the exception is still present in ThreadState, this must be a detached thread, so
+      // the exception will never be rethrown. We should at least log it.
+      //
+      // We need to run the thread initializer again before we log anything because the main
+      // purpose of the thread initializer is to set up a logging callback.
+      initializer([&]() {
+        KJ_LOG(ERROR, "uncaught exception thrown by detached thread", *e);
+      });
     }
 
     delete this;
   }
+}
+
+#if _WIN32
+DWORD Thread::runThread(void* ptr) {
+#else
+void* Thread::runThread(void* ptr) {
+#endif
+  ThreadState* state = reinterpret_cast<ThreadState*>(ptr);
+  KJ_IF_MAYBE(exception, kj::runCatchingExceptions([&]() {
+    state->initializer(kj::mv(state->func));
+  })) {
+    state->exception = kj::mv(*exception);
+  }
+  state->unref();
+  return 0;
 }
 
 }  // namespace kj

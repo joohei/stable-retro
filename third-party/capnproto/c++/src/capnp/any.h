@@ -19,17 +19,16 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 // THE SOFTWARE.
 
-#ifndef CAPNP_ANY_H_
-#define CAPNP_ANY_H_
-
-#if defined(__GNUC__) && !defined(CAPNP_HEADER_WARNINGS)
-#pragma GCC system_header
-#endif
+#pragma once
 
 #include "layout.h"
 #include "pointer-helpers.h"
 #include "orphan.h"
 #include "list.h"
+#include <kj/windows-sanity.h>  // work-around macro conflict with `VOID`
+#include <kj/hash.h>
+
+CAPNP_BEGIN_HEADER
 
 namespace capnp {
 
@@ -105,9 +104,9 @@ struct AnyPointer {
     inline bool isList() const { return getPointerType() == PointerType::LIST; }
     inline bool isCapability() const { return getPointerType() == PointerType::CAPABILITY; }
 
-    Equality equals(AnyPointer::Reader right);
-    bool operator==(AnyPointer::Reader right);
-    inline bool operator!=(AnyPointer::Reader right) {
+    Equality equals(AnyPointer::Reader right) const;
+    bool operator==(AnyPointer::Reader right) const;
+    inline bool operator!=(AnyPointer::Reader right) const {
       return !(*this == right);
     }
 
@@ -159,13 +158,13 @@ struct AnyPointer {
     inline bool isList() { return getPointerType() == PointerType::LIST; }
     inline bool isCapability() { return getPointerType() == PointerType::CAPABILITY; }
 
-    inline Equality equals(AnyPointer::Reader right) {
+    inline Equality equals(AnyPointer::Reader right) const {
       return asReader().equals(right);
     }
-    inline bool operator==(AnyPointer::Reader right) {
+    inline bool operator==(AnyPointer::Reader right) const {
       return asReader() == right;
     }
-    inline bool operator!=(AnyPointer::Reader right) {
+    inline bool operator!=(AnyPointer::Reader right) const {
       return !(*this == right);
     }
 
@@ -408,6 +407,10 @@ struct List<AnyPointer, Kind::OTHER> {
     inline Iterator begin() const { return Iterator(this, 0); }
     inline Iterator end() const { return Iterator(this, size()); }
 
+    inline MessageSize totalSize() const {
+      return reader.totalSize().asPublic();
+    }
+
   private:
     _::ListReader reader;
     template <typename U, Kind K>
@@ -461,10 +464,12 @@ public:
   inline Reader(T&& value)
       : _reader(_::PointerHelpers<FromReader<T>>::getInternalReader(kj::fwd<T>(value))) {}
 
-  kj::ArrayPtr<const byte> getDataSection() {
+  inline MessageSize totalSize() const { return _reader.totalSize().asPublic(); }
+
+  kj::ArrayPtr<const byte> getDataSection() const {
     return _reader.getDataSectionAsBlob();
   }
-  List<AnyPointer>::Reader getPointerSection() {
+  List<AnyPointer>::Reader getPointerSection() const {
     return List<AnyPointer>::Reader(_reader.getPointerSectionAsList());
   }
 
@@ -472,9 +477,9 @@ public:
     return _reader.canonicalize();
   }
 
-  Equality equals(AnyStruct::Reader right);
-  bool operator==(AnyStruct::Reader right);
-  inline bool operator!=(AnyStruct::Reader right) {
+  Equality equals(AnyStruct::Reader right) const;
+  bool operator==(AnyStruct::Reader right) const;
+  inline bool operator!=(AnyStruct::Reader right) const {
     return !(*this == right);
   }
 
@@ -483,6 +488,11 @@ public:
     // T must be a struct type.
     return typename T::Reader(_reader);
   }
+
+  template <typename T>
+  ReaderFor<T> as(StructSchema schema) const;
+  // T must be DynamicStruct. Defined in dynamic.h.
+
 private:
   _::StructReader _reader;
 
@@ -498,7 +508,7 @@ public:
   inline Builder(decltype(nullptr)) {}
   inline Builder(_::StructBuilder builder): _builder(builder) {}
 
-#if !_MSC_VER  // TODO(msvc): MSVC ICEs on this. Try restoring when compiler improves.
+#if !_MSC_VER || defined(__clang__) // TODO(msvc): MSVC ICEs on this. Try restoring when compiler improves.
   template <typename T, typename = kj::EnableIf<CAPNP_KIND(FromBuilder<T>) == Kind::STRUCT>>
   inline Builder(T&& value)
       : _builder(_::PointerHelpers<FromBuilder<T>>::getInternalBuilder(kj::fwd<T>(value))) {}
@@ -511,13 +521,13 @@ public:
     return List<AnyPointer>::Builder(_builder.getPointerSectionAsList());
   }
 
-  inline Equality equals(AnyStruct::Reader right) {
+  inline Equality equals(AnyStruct::Reader right) const {
     return asReader().equals(right);
   }
-  inline bool operator==(AnyStruct::Reader right) {
+  inline bool operator==(AnyStruct::Reader right) const {
     return asReader() == right;
   }
-  inline bool operator!=(AnyStruct::Reader right) {
+  inline bool operator!=(AnyStruct::Reader right) const {
     return !(*this == right);
   }
 
@@ -529,6 +539,11 @@ public:
     // T must be a struct type.
     return typename T::Builder(_builder);
   }
+
+  template <typename T>
+  BuilderFor<T> as(StructSchema schema);
+  // T must be DynamicStruct. Defined in dynamic.h.
+
 private:
   _::StructBuilder _builder;
   friend class Orphanage;
@@ -572,6 +587,10 @@ public:
   typedef _::IndexingIterator<const Reader, typename AnyStruct::Reader> Iterator;
   inline Iterator begin() const { return Iterator(this, 0); }
   inline Iterator end() const { return Iterator(this, size()); }
+
+  inline MessageSize totalSize() const {
+    return reader.totalSize().asPublic();
+  }
 
 private:
   _::ListReader reader;
@@ -621,24 +640,28 @@ public:
   inline Reader(): _reader(ElementSize::VOID) {}
   inline Reader(_::ListReader reader): _reader(reader) {}
 
-#if !_MSC_VER  // TODO(msvc): MSVC ICEs on this. Try restoring when compiler improves.
+#if !_MSC_VER || defined(__clang__) // TODO(msvc): MSVC ICEs on this. Try restoring when compiler improves.
   template <typename T, typename = kj::EnableIf<CAPNP_KIND(FromReader<T>) == Kind::LIST>>
   inline Reader(T&& value)
       : _reader(_::PointerHelpers<FromReader<T>>::getInternalReader(kj::fwd<T>(value))) {}
 #endif
 
-  inline ElementSize getElementSize() { return _reader.getElementSize(); }
-  inline uint size() { return unbound(_reader.size() / ELEMENTS); }
+  inline ElementSize getElementSize() const { return _reader.getElementSize(); }
+  inline uint size() const { return unbound(_reader.size() / ELEMENTS); }
 
-  inline kj::ArrayPtr<const byte> getRawBytes() { return _reader.asRawBytes(); }
+  inline kj::ArrayPtr<const byte> getRawBytes() const { return _reader.asRawBytes(); }
 
-  Equality equals(AnyList::Reader right);
-  bool operator==(AnyList::Reader right);
-  inline bool operator!=(AnyList::Reader right) {
+  Equality equals(AnyList::Reader right) const;
+  bool operator==(AnyList::Reader right) const;
+  inline bool operator!=(AnyList::Reader right) const {
     return !(*this == right);
   }
 
-  template <typename T> ReaderFor<T> as() {
+  inline MessageSize totalSize() const {
+    return _reader.totalSize().asPublic();
+  }
+
+  template <typename T> ReaderFor<T> as() const {
     // T must be List<U>.
     return ReaderFor<T>(_reader);
   }
@@ -657,7 +680,7 @@ public:
   inline Builder(decltype(nullptr)): _builder(ElementSize::VOID) {}
   inline Builder(_::ListBuilder builder): _builder(builder) {}
 
-#if !_MSC_VER  // TODO(msvc): MSVC ICEs on this. Try restoring when compiler improves.
+#if !_MSC_VER || defined(__clang__) // TODO(msvc): MSVC ICEs on this. Try restoring when compiler improves.
   template <typename T, typename = kj::EnableIf<CAPNP_KIND(FromBuilder<T>) == Kind::LIST>>
   inline Builder(T&& value)
       : _builder(_::PointerHelpers<FromBuilder<T>>::getInternalBuilder(kj::fwd<T>(value))) {}
@@ -666,11 +689,11 @@ public:
   inline ElementSize getElementSize() { return _builder.getElementSize(); }
   inline uint size() { return unbound(_builder.size() / ELEMENTS); }
 
-  Equality equals(AnyList::Reader right);
-  inline bool operator==(AnyList::Reader right) {
+  Equality equals(AnyList::Reader right) const;
+  inline bool operator==(AnyList::Reader right) const{
     return asReader() == right;
   }
-  inline bool operator!=(AnyList::Reader right) {
+  inline bool operator!=(AnyList::Reader right) const{
     return !(*this == right);
   }
 
@@ -713,6 +736,27 @@ struct PipelineOp {
   };
 };
 
+inline uint KJ_HASHCODE(const PipelineOp& op) {
+  switch (op.type) {
+    case PipelineOp::NOOP: return kj::hashCode(op.type);
+    case PipelineOp::GET_POINTER_FIELD: return kj::hashCode(op.type, op.pointerIndex);
+  }
+  KJ_CLANG_KNOWS_THIS_IS_UNREACHABLE_BUT_GCC_DOESNT
+}
+
+inline bool operator==(const PipelineOp& a, const PipelineOp& b) {
+  if (a.type != b.type) return false;
+  switch (a.type) {
+    case PipelineOp::NOOP: return true;
+    case PipelineOp::GET_POINTER_FIELD: return a.pointerIndex == b.pointerIndex;
+  }
+  KJ_CLANG_KNOWS_THIS_IS_UNREACHABLE_BUT_GCC_DOESNT
+}
+
+inline bool operator!=(const PipelineOp& a, const PipelineOp& b) {
+  return !(a == b);
+}
+
 class PipelineHook {
   // Represents a currently-running call, and implements pipelined requests on its result.
 
@@ -729,6 +773,9 @@ public:
 
   template <typename Pipeline, typename = FromPipeline<Pipeline>>
   static inline kj::Own<PipelineHook> from(Pipeline&& pipeline);
+
+  template <typename Pipeline, typename = FromPipeline<Pipeline>>
+  static inline PipelineHook& from(Pipeline& pipeline);
 
 private:
   template <typename T> struct FromImpl;
@@ -1052,12 +1099,18 @@ struct PipelineHook::FromImpl {
   static inline kj::Own<PipelineHook> apply(typename T::Pipeline&& pipeline) {
     return from(kj::mv(pipeline._typeless));
   }
+  static inline PipelineHook& apply(typename T::Pipeline& pipeline) {
+    return from(pipeline._typeless);
+  }
 };
 
 template <>
 struct PipelineHook::FromImpl<AnyPointer> {
   static inline kj::Own<PipelineHook> apply(AnyPointer::Pipeline&& pipeline) {
     return kj::mv(pipeline.hook);
+  }
+  static inline PipelineHook& apply(AnyPointer::Pipeline& pipeline) {
+    return *pipeline.hook;
   }
 };
 
@@ -1066,8 +1119,13 @@ inline kj::Own<PipelineHook> PipelineHook::from(Pipeline&& pipeline) {
   return FromImpl<T>::apply(kj::fwd<Pipeline>(pipeline));
 }
 
+template <typename Pipeline, typename T>
+inline PipelineHook& PipelineHook::from(Pipeline& pipeline) {
+  return FromImpl<T>::apply(pipeline);
+}
+
 #endif  // !CAPNP_LITE
 
 }  // namespace capnp
 
-#endif  // CAPNP_ANY_H_
+CAPNP_END_HEADER

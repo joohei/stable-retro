@@ -19,15 +19,12 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 // THE SOFTWARE.
 
-#ifndef CAPNP_SCHEMA_LITE_H_
-#define CAPNP_SCHEMA_LITE_H_
-
-#if defined(__GNUC__) && !defined(CAPNP_HEADER_WARNINGS)
-#pragma GCC system_header
-#endif
+#pragma once
 
 #include <capnp/schema.capnp.h>
 #include "message.h"
+
+CAPNP_BEGIN_HEADER
 
 namespace capnp {
 
@@ -45,4 +42,4 @@ inline schema::Node::Reader schemaProto() {
 
 }  // namespace capnp
 
-#endif  // CAPNP_SCHEMA_LITE_H_
+CAPNP_END_HEADER

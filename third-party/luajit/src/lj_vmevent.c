@@ -1,6 +1,6 @@
 /*
 ** VM event handling.
-** Copyright (C) 2005-2017 Mike Pall. See Copyright Notice in luajit.h
+** Copyright (C) 2005-2023 Mike Pall. See Copyright Notice in luajit.h
 */
 
 #include <stdio.h>
@@ -55,3 +55,4 @@ void lj_vmevent_call(lua_State *L, ptrdiff_t argbase)
   if (g->vmevmask != VMEVENT_NOCACHE)
     g->vmevmask = oldmask;  /* Restore event mask, but not if not modified. */
 }
+

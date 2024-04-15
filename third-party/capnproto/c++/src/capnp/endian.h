@@ -19,16 +19,13 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 // THE SOFTWARE.
 
-#ifndef CAPNP_ENDIAN_H_
-#define CAPNP_ENDIAN_H_
-
-#if defined(__GNUC__) && !defined(CAPNP_HEADER_WARNINGS)
-#pragma GCC system_header
-#endif
+#pragma once
 
 #include "common.h"
 #include <inttypes.h>
 #include <string.h>  // memcpy
+
+CAPNP_BEGIN_HEADER
 
 namespace capnp {
 namespace _ {  // private
@@ -306,4 +303,4 @@ using WireValue = ShiftingWireValue<T>;
 }  // namespace _ (private)
 }  // namespace capnp
 
-#endif  // CAPNP_ENDIAN_H_
+CAPNP_END_HEADER

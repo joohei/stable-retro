@@ -19,18 +19,15 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 // THE SOFTWARE.
 
-#ifndef CAPNP_COMPILER_PARSER_H_
-#define CAPNP_COMPILER_PARSER_H_
-
-#if defined(__GNUC__) && !defined(CAPNP_HEADER_WARNINGS)
-#pragma GCC system_header
-#endif
+#pragma once
 
 #include <capnp/compiler/grammar.capnp.h>
 #include <capnp/compiler/lexer.capnp.h>
 #include <kj/parse/common.h>
 #include <kj/arena.h>
 #include "error-reporter.h"
+
+CAPNP_BEGIN_HEADER
 
 namespace capnp {
 namespace compiler {
@@ -145,7 +142,10 @@ private:
   Parsers parsers;
 };
 
+kj::String expressionString(Expression::Reader name);
+// Stringify the expression as code.
+
 }  // namespace compiler
 }  // namespace capnp
 
-#endif  // CAPNP_COMPILER_PARSER_H_
+CAPNP_END_HEADER

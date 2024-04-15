@@ -19,17 +19,15 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 // THE SOFTWARE.
 
-#ifndef KJ_IO_H_
-#define KJ_IO_H_
-
-#if defined(__GNUC__) && !KJ_HEADER_WARNINGS
-#pragma GCC system_header
-#endif
+#pragma once
 
 #include <stddef.h>
 #include "common.h"
 #include "array.h"
 #include "exception.h"
+#include <stdint.h>
+
+KJ_BEGIN_HEADER
 
 namespace kj {
 
@@ -66,6 +64,14 @@ public:
   virtual void skip(size_t bytes);
   // Skips past the given number of bytes, discarding them.  The default implementation read()s
   // into a scratch buffer.
+
+  String readAllText(uint64_t limit = kj::maxValue);
+  Array<byte> readAllBytes(uint64_t limit = kj::maxValue);
+  // Read until EOF and return as one big byte array or string. Throw an exception if EOF is not
+  // seen before reading `limit` bytes.
+  //
+  // To prevent runaway memory allocation, consider using a more conservative value for `limit` than
+  // the default, particularly on untrusted data streams which may never see EOF.
 };
 
 class OutputStream {
@@ -283,9 +289,15 @@ public:
   inline bool operator==(decltype(nullptr)) { return fd < 0; }
   inline bool operator!=(decltype(nullptr)) { return fd >= 0; }
 
+  inline int release() {
+    // Release ownership of an FD. Not recommended.
+    int result = fd;
+    fd = -1;
+    return result;
+  }
+
 private:
   int fd;
-  UnwindDetector unwindDetector;
 };
 
 inline auto KJ_STRINGIFY(const AutoCloseFd& fd)
@@ -376,6 +388,13 @@ public:
   inline bool operator==(decltype(nullptr)) { return handle != (void*)-1; }
   inline bool operator!=(decltype(nullptr)) { return handle == (void*)-1; }
 
+  inline void* release() {
+    // Release ownership of an FD. Not recommended.
+    void* result = handle;
+    handle = (void*)-1;
+    return result;
+  }
+
 private:
   void* handle;  // -1 (aka INVALID_HANDLE_VALUE) if not valid.
 };
@@ -416,4 +435,4 @@ private:
 
 }  // namespace kj
 
-#endif  // KJ_IO_H_
+KJ_END_HEADER

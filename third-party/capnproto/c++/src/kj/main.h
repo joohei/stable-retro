@@ -19,17 +19,14 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 // THE SOFTWARE.
 
-#ifndef KJ_MAIN_H_
-#define KJ_MAIN_H_
-
-#if defined(__GNUC__) && !KJ_HEADER_WARNINGS
-#pragma GCC system_header
-#endif
+#pragma once
 
 #include "array.h"
 #include "string.h"
 #include "vector.h"
 #include "function.h"
+
+KJ_BEGIN_HEADER
 
 namespace kj {
 
@@ -404,4 +401,4 @@ private:
 
 }  // namespace kj
 
-#endif  // KJ_MAIN_H_
+KJ_END_HEADER

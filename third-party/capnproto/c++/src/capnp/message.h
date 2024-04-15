@@ -19,26 +19,25 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 // THE SOFTWARE.
 
+#pragma once
+
 #include <kj/common.h>
 #include <kj/memory.h>
 #include <kj/mutex.h>
 #include <kj/debug.h>
+#include <kj/vector.h>
 #include "common.h"
 #include "layout.h"
 #include "any.h"
 
-#ifndef CAPNP_MESSAGE_H_
-#define CAPNP_MESSAGE_H_
-
-#if defined(__GNUC__) && !defined(CAPNP_HEADER_WARNINGS)
-#pragma GCC system_header
-#endif
+CAPNP_BEGIN_HEADER
 
 namespace capnp {
 
 namespace _ {  // private
   class ReaderArena;
   class BuilderArena;
+  struct CloneImpl;
 }
 
 class StructSchema;
@@ -122,14 +121,23 @@ public:
   bool isCanonical();
   // Returns whether the message encoded in the reader is in canonical form.
 
+  size_t sizeInWords();
+  // Add up the size of all segments.
+
 private:
   ReaderOptions options;
 
+#if defined(__EMSCRIPTEN__)
+  static constexpr size_t arenaSpacePadding = 19;
+#else
+  static constexpr size_t arenaSpacePadding = 18;
+#endif
+
   // Space in which we can construct a ReaderArena.  We don't use ReaderArena directly here
   // because we don't want clients to have to #include arena.h, which itself includes a bunch of
-  // big STL headers.  We don't use a pointer to a ReaderArena because that would require an
+  // other headers.  We don't use a pointer to a ReaderArena because that would require an
   // extra malloc on every message which could be expensive when processing small messages.
-  void* arenaSpace[15 + sizeof(kj::MutexGuarded<void*>) / sizeof(void*)];
+  alignas(8) void* arenaSpace[arenaSpacePadding + sizeof(kj::MutexGuarded<void*>) / sizeof(void*)];
   bool allocatedArena;
 
   _::ReaderArena* arena() { return reinterpret_cast<_::ReaderArena*>(arenaSpace); }
@@ -183,13 +191,15 @@ public:
   //   new objects in this message.
 
   virtual kj::ArrayPtr<word> allocateSegment(uint minimumSize) = 0;
-  // Allocates an array of at least the given number of words, throwing an exception or crashing if
-  // this is not possible.  It is expected that this method will usually return more space than
-  // requested, and the caller should use that extra space as much as possible before allocating
-  // more.  The returned space remains valid at least until the MessageBuilder is destroyed.
+  // Allocates an array of at least the given number of zero'd words, throwing an exception or
+  // crashing if this is not possible.  It is expected that this method will usually return more
+  // space than requested, and the caller should use that extra space as much as possible before
+  // allocating more.  The returned space remains valid at least until the MessageBuilder is
+  // destroyed.
   //
-  // Cap'n Proto will only call this once at a time, so the subclass need not worry about
-  // thread-safety.
+  // allocateSegment() is responsible for zeroing the memory before returning. This is required
+  // because otherwise the Cap'n Proto implementation would have to zero the memory anyway, and
+  // many allocators are able to provide already-zero'd memory more efficiently.
 
   template <typename RootType>
   typename RootType::Builder initRoot();
@@ -227,8 +237,11 @@ public:
   bool isCanonical();
   // Check whether the message builder is in canonical form
 
+  size_t sizeInWords();
+  // Add up the allocated space from all segments.
+
 private:
-  void* arenaSpace[22];
+  alignas(8) void* arenaSpace[22];
   // Space in which we can construct a BuilderArena.  We don't use BuilderArena directly here
   // because we don't want clients to have to #include arena.h, which itself includes a bunch of
   // big STL headers.  We don't use a pointer to a BuilderArena because that would require an
@@ -244,6 +257,14 @@ private:
   _::BuilderArena* arena() { return reinterpret_cast<_::BuilderArena*>(arenaSpace); }
   _::SegmentBuilder* getRootSegment();
   AnyPointer::Builder getRootInternal();
+
+  kj::Own<_::CapTableBuilder> releaseBuiltinCapTable();
+  // Hack for clone() to extract the cap table.
+
+  friend struct _::CloneImpl;
+  // We can't declare clone() as a friend directly because old versions of GCC incorrectly demand
+  // that the first declaration (even if it is a friend declaration) specify the default type args,
+  // whereas correct compilers do not permit default type args to be specified on a friend decl.
 };
 
 template <typename RootType>
@@ -304,6 +325,10 @@ static typename Type::Reader defaultValue();
 // Get a default instance of the given struct or list type.
 //
 // TODO(cleanup):  Find a better home for this function?
+
+template <typename Reader, typename = FromReader<Reader>>
+kj::Own<kj::Decay<Reader>> clone(Reader&& reader);
+// Make a deep copy of the given Reader on the heap, producing an owned pointer.
 
 // =======================================================================================
 
@@ -388,9 +413,7 @@ private:
   bool returnedFirstSegment;
 
   void* firstSegment;
-
-  struct MoreSegments;
-  kj::Maybe<kj::Own<MoreSegments>> moreSegments;
+  kj::Vector<void*> moreSegments;
 };
 
 class FlatMessageBuilder: public MessageBuilder {
@@ -498,6 +521,33 @@ static typename Type::Reader defaultValue() {
   return typename Type::Reader(_::StructReader());
 }
 
+namespace _ {
+  struct CloneImpl {
+    static inline kj::Own<_::CapTableBuilder> releaseBuiltinCapTable(MessageBuilder& message) {
+      return message.releaseBuiltinCapTable();
+    }
+  };
+};
+
+template <typename Reader, typename>
+kj::Own<kj::Decay<Reader>> clone(Reader&& reader) {
+  auto size = reader.totalSize();
+  auto buffer = kj::heapArray<capnp::word>(size.wordCount + 1);
+  memset(buffer.asBytes().begin(), 0, buffer.asBytes().size());
+  if (size.capCount == 0) {
+    copyToUnchecked(reader, buffer);
+    auto result = readMessageUnchecked<FromReader<Reader>>(buffer.begin());
+    return kj::attachVal(result, kj::mv(buffer));
+  } else {
+    FlatMessageBuilder builder(buffer);
+    builder.setRoot(kj::fwd<Reader>(reader));
+    builder.requireFilled();
+    auto capTable = _::CloneImpl::releaseBuiltinCapTable(builder);
+    AnyPointer::Reader raw(_::PointerReader::getRootUnchecked(buffer.begin()).imbue(capTable));
+    return kj::attachVal(raw.getAs<FromReader<Reader>>(), kj::mv(buffer), kj::mv(capTable));
+  }
+}
+
 template <typename T>
 kj::Array<word> canonicalize(T&& reader) {
     return _::PointerHelpers<FromReader<T>>::getInternalReader(reader).canonicalize();
@@ -505,4 +555,4 @@ kj::Array<word> canonicalize(T&& reader) {
 
 }  // namespace capnp
 
-#endif  // CAPNP_MESSAGE_H_
+CAPNP_END_HEADER

@@ -34,25 +34,36 @@ namespace capnp {
 namespace _ {  // private
 
 #if !CAPNP_LITE
-static BrokenCapFactory* brokenCapFactory = nullptr;
+static BrokenCapFactory* globalBrokenCapFactory = nullptr;
 // Horrible hack:  We need to be able to construct broken caps without any capability context,
 // but we can't have a link-time dependency on libcapnp-rpc.
 
 void setGlobalBrokenCapFactoryForLayoutCpp(BrokenCapFactory& factory) {
   // Called from capability.c++ when the capability API is used, to make sure that layout.c++
   // is ready for it.  May be called multiple times but always with the same value.
-#if __GNUC__
-  __atomic_store_n(&brokenCapFactory, &factory, __ATOMIC_RELAXED);
+#if __GNUC__ || defined(__clang__)
+  __atomic_store_n(&globalBrokenCapFactory, &factory, __ATOMIC_RELAXED);
 #elif _MSC_VER
-  *static_cast<BrokenCapFactory* volatile*>(&brokenCapFactory) = &factory;
+  *static_cast<BrokenCapFactory* volatile*>(&globalBrokenCapFactory) = &factory;
 #else
 #error "Platform not supported"
+#endif
+}
+
+static BrokenCapFactory* readGlobalBrokenCapFactoryForLayoutCpp() {
+#if __GNUC__ || defined(__clang__)
+  // Thread-sanitizer doesn't have the right information to know this is safe without doing an
+  // atomic read. https://groups.google.com/g/capnproto/c/634juhn5ap0/m/pyRiwWl1AAAJ
+  return __atomic_load_n(&globalBrokenCapFactory, __ATOMIC_RELAXED);
+#else
+  return globalBrokenCapFactory;
 #endif
 }
 
 }  // namespace _ (private)
 
 const uint ClientHook::NULL_CAPABILITY_BRAND = 0;
+const uint ClientHook::BROKEN_CAPABILITY_BRAND = 0;
 // Defined here rather than capability.c++ so that we can safely call isNull() in this file.
 
 namespace _ {  // private
@@ -66,6 +77,16 @@ namespace _ {  // private
 #endif
 
 // =======================================================================================
+
+#if __GNUC__ >= 8 && !__clang__
+// GCC 8 introduced a warning which complains whenever we try to memset() or memcpy() a
+// WirePointer, because we deleted the regular copy constructor / assignment operator. Weirdly, if
+// I remove those deletions, GCC *still* complains that WirePointer is non-trivial. I don't
+// understand why -- maybe because WireValue has private members? We don't want to make WireValue's
+// member public, but memset() and memcpy() on it are certainly valid and desirable, so we'll just
+// have to disable the warning I guess.
+#pragma GCC diagnostic ignored "-Wclass-memaccess"
+#endif
 
 struct WirePointer {
   // A pointer, in exactly the format in which it appears on the wire.
@@ -153,7 +174,7 @@ struct WirePointer {
                 reinterpret_cast<uintptr_t>(segment->getStartPtr()));
     KJ_DREQUIRE(reinterpret_cast<uintptr_t>(target) <=
                 reinterpret_cast<uintptr_t>(segment->getStartPtr() + segment->getSize()));
-    offsetAndKind.set(((target - reinterpret_cast<word*>(this) - 1) << 2) | kind);
+    offsetAndKind.set((static_cast<uint32_t>(target - reinterpret_cast<word*>(this) - 1) << 2) | kind);
   }
   KJ_ALWAYS_INLINE(void setKindWithZeroOffset(Kind kind)) {
     offsetAndKind.set(kind);
@@ -366,15 +387,15 @@ struct WireHelpers {
 #endif
 
   static KJ_ALWAYS_INLINE(void zeroMemory(byte* ptr, ByteCount32 count)) {
-    memset(ptr, 0, unbound(count / BYTES));
+    if (count != ZERO * BYTES) memset(ptr, 0, unbound(count / BYTES));
   }
 
   static KJ_ALWAYS_INLINE(void zeroMemory(word* ptr, WordCountN<29> count)) {
-    memset(ptr, 0, unbound(count * BYTES_PER_WORD / BYTES));
+    if (count != ZERO * WORDS) memset(ptr, 0, unbound(count * BYTES_PER_WORD / BYTES));
   }
 
   static KJ_ALWAYS_INLINE(void zeroMemory(WirePointer* ptr, WirePointerCountN<29> count)) {
-    memset(ptr, 0, unbound(count * BYTES_PER_POINTER / BYTES));
+    if (count != ZERO * POINTERS) memset(ptr, 0, unbound(count * BYTES_PER_POINTER / BYTES));
   }
 
   static KJ_ALWAYS_INLINE(void zeroMemory(WirePointer* ptr)) {
@@ -383,20 +404,20 @@ struct WireHelpers {
 
   template <typename T>
   static inline void zeroMemory(kj::ArrayPtr<T> array) {
-    memset(array.begin(), 0, array.size() * sizeof(array[0]));
+    if (array.size() != 0u) memset(array.begin(), 0, array.size() * sizeof(array[0]));
   }
 
   static KJ_ALWAYS_INLINE(void copyMemory(byte* to, const byte* from, ByteCount32 count)) {
-    memcpy(to, from, unbound(count / BYTES));
+    if (count != ZERO * BYTES) memcpy(to, from, unbound(count / BYTES));
   }
 
   static KJ_ALWAYS_INLINE(void copyMemory(word* to, const word* from, WordCountN<29> count)) {
-    memcpy(to, from, unbound(count * BYTES_PER_WORD / BYTES));
+    if (count != ZERO * WORDS) memcpy(to, from, unbound(count * BYTES_PER_WORD / BYTES));
   }
 
   static KJ_ALWAYS_INLINE(void copyMemory(WirePointer* to, const WirePointer* from,
                                           WirePointerCountN<29> count)) {
-    memcpy(to, from, unbound(count * BYTES_PER_POINTER  / BYTES));
+    if (count != ZERO * POINTERS) memcpy(to, from, unbound(count * BYTES_PER_POINTER  / BYTES));
   }
 
   template <typename T>
@@ -407,14 +428,14 @@ struct WireHelpers {
   // TODO(cleanup): Turn these into a .copyTo() method of ArrayPtr?
   template <typename T>
   static inline void copyMemory(T* to, kj::ArrayPtr<T> from) {
-    memcpy(to, from.begin(), from.size() * sizeof(from[0]));
+    if (from.size() != 0u) memcpy(to, from.begin(), from.size() * sizeof(from[0]));
   }
   template <typename T>
   static inline void copyMemory(T* to, kj::ArrayPtr<const T> from) {
-    memcpy(to, from.begin(), from.size() * sizeof(from[0]));
+    if (from.size() != 0u) memcpy(to, from.begin(), from.size() * sizeof(from[0]));
   }
   static KJ_ALWAYS_INLINE(void copyMemory(char* to, kj::StringPtr from)) {
-    memcpy(to, from.begin(), from.size() * sizeof(from[0]));
+    if (from.size() != 0u) memcpy(to, from.begin(), from.size() * sizeof(from[0]));
   }
 
   static KJ_ALWAYS_INLINE(bool boundsCheck(
@@ -431,7 +452,9 @@ struct WireHelpers {
   static KJ_ALWAYS_INLINE(word* allocate(
       WirePointer*& ref, SegmentBuilder*& segment, CapTableBuilder* capTable,
       SegmentWordCount amount, WirePointer::Kind kind, BuilderArena* orphanArena)) {
-    // Allocate space in the message for a new object, creating far pointers if necessary.
+    // Allocate space in the message for a new object, creating far pointers if necessary. The
+    // space is guaranteed to be zero'd (because MessageBuilder implementations are required to
+    // return zero'd memory).
     //
     // * `ref` starts out being a reference to the pointer which shall be assigned to point at the
     //   new object.  On return, `ref` points to a pointer which needs to be initialized with
@@ -838,7 +861,7 @@ struct WireHelpers {
 
             // We count the actual size rather than the claimed word count because that's what
             // we'll end up with if we make a copy.
-            result.addWords(wordCount + POINTER_SIZE_IN_WORDS);
+            result.addWords(actualSize + POINTER_SIZE_IN_WORDS);
 
             WordCount dataSize = elementTag->structRef.dataSize.get();
             WirePointerCount pointerCount = elementTag->structRef.ptrCount.get();
@@ -1599,7 +1622,8 @@ struct WireHelpers {
     // Initialize the pointer.
     ref->listRef.set(ElementSize::BYTE, byteSize * (ONE * ELEMENTS / BYTES));
 
-    // Build the Text::Builder.  This will initialize the NUL terminator.
+    // Build the Text::Builder. Note that since allocate()ed memory is pre-zero'd, we don't need
+    // to initialize the NUL terminator.
     return { segment, Text::Builder(reinterpret_cast<char*>(ptr), unbound(size / BYTES)) };
   }
 
@@ -2174,6 +2198,8 @@ struct WireHelpers {
       const WirePointer* ref, int nestingLimit)) {
     kj::Maybe<kj::Own<ClientHook>> maybeCap;
 
+    auto brokenCapFactory = readGlobalBrokenCapFactoryForLayoutCpp();
+
     KJ_REQUIRE(brokenCapFactory != nullptr,
                "Trying to read capabilities without ever having created a capability context.  "
                "To read capabilities from a message, you must imbue it with CapReaderContext, or "
@@ -2307,10 +2333,6 @@ struct WireHelpers {
             break;
 
           case ElementSize::POINTER:
-            // We expected a list of pointers but got a list of structs.  Assuming the first field
-            // in the struct is the pointer we were looking for, we want to munge the pointer to
-            // point at the first element's pointer section.
-            ptr += tag->structRef.dataSize.get();
             KJ_REQUIRE(tag->structRef.ptrCount.get() > ZERO * POINTERS,
                        "Expected a pointer list, but got a list of data-only structs.") {
               goto useDefault;
@@ -2758,12 +2780,23 @@ bool PointerReader::isCanonical(const word **readHead) {
       // The pointer is null, we are canonical and do not read
       return true;
     case PointerType::STRUCT: {
-      bool dataTrunc, ptrTrunc;
+      bool dataTrunc = false, ptrTrunc = false;
       auto structReader = this->getStruct(nullptr);
       if (structReader.getDataSectionSize() == ZERO * BITS &&
           structReader.getPointerSectionSize() == ZERO * POINTERS) {
         return reinterpret_cast<const word*>(this->pointer) == structReader.getLocation();
       } else {
+        // Fun fact: Once this call to isCanonical() returns, Clang may re-order the evaluation of
+        //   the && operators. In theory this is wrong because && is short-circuiting, but Clang
+        //   apparently sees that there are no side effects to the right of &&, so decides it is
+        //   safe to skip short-circuiting. It turns out, though, this is observable under
+        //   valgrind: if we don't initialize `dataTrunc` when declaring it above, then valgrind
+        //   reports "Conditional jump or move depends on uninitialised value(s)". Specifically
+        //   this happens in cases where structReader.isCanonical() returns false -- it is allowed
+        //   to skip initializing `dataTrunc` in that case. The short-circuiting && should mean
+        //   that we don't read `dataTrunc` in that case, except Clang's optimizations. Ultimately
+        //   the uninitialized read is fine because eventually the whole expression evaluates false
+        //   either way. But, to make valgrind happy, we initialize the bools above...
         return structReader.isCanonical(readHead, readHead, &dataTrunc, &ptrTrunc) && dataTrunc && ptrTrunc;
       }
     }
@@ -2838,6 +2871,17 @@ void StructBuilder::transferContentFrom(StructBuilder other) {
 void StructBuilder::copyContentFrom(StructReader other) {
   // Determine the amount of data the builders have in common.
   auto sharedDataSize = kj::min(dataSize, other.dataSize);
+  auto sharedPointerCount = kj::min(pointerCount, other.pointerCount);
+
+  if ((sharedDataSize > ZERO * BITS && other.data == data) ||
+      (sharedPointerCount > ZERO * POINTERS && other.pointers == pointers)) {
+    // At least one of the section pointers is pointing to ourself. Verify that the other is two
+    // (but ignore empty sections).
+    KJ_ASSERT((sharedDataSize == ZERO * BITS || other.data == data) &&
+              (sharedPointerCount == ZERO * POINTERS || other.pointers == pointers));
+    // So `other` appears to be a reader for this same struct. No coping is needed.
+    return;
+  }
 
   if (dataSize > sharedDataSize) {
     // Since the target is larger than the source, make sure to zero out the extra bits that the
@@ -2867,7 +2911,6 @@ void StructBuilder::copyContentFrom(StructReader other) {
   WireHelpers::zeroMemory(pointers, pointerCount);
 
   // Copy the pointers.
-  auto sharedPointerCount = kj::min(pointerCount, other.pointerCount);
   for (auto i: kj::zeroTo(sharedPointerCount)) {
     WireHelpers::copyPointer(segment, capTable, pointers + i,
         other.segment, other.capTable, other.pointers + i, other.nestingLimit);
@@ -3074,7 +3117,7 @@ Data::Reader ListReader::asData() {
   return Data::Reader(reinterpret_cast<const byte*>(ptr), unbound(elementCount / ELEMENTS));
 }
 
-kj::ArrayPtr<const byte> ListReader::asRawBytes() {
+kj::ArrayPtr<const byte> ListReader::asRawBytes() const {
   KJ_REQUIRE(structPointerCount == ZERO * POINTERS,
              "Expected data only, got pointers.") {
     return kj::ArrayPtr<const byte>();
@@ -3096,16 +3139,69 @@ StructReader ListReader::getStructElement(ElementCount index) const {
   const WirePointer* structPointers =
       reinterpret_cast<const WirePointer*>(structData + structDataSize / BITS_PER_BYTE);
 
-  // This check should pass if there are no bugs in the list pointer validation code.
-  KJ_DASSERT(structPointerCount == ZERO * POINTERS ||
-         (uintptr_t)structPointers % sizeof(void*) == 0,
-         "Pointer section of struct list element not aligned.");
-
   KJ_DASSERT(indexBit % BITS_PER_BYTE == ZERO * BITS);
   return StructReader(
       segment, capTable, structData, structPointers,
       structDataSize, structPointerCount,
       nestingLimit - 1);
+}
+
+MessageSizeCounts ListReader::totalSize() const {
+  // TODO(cleanup): This is kind of a lot of logic duplicated from WireHelpers::totalSize(), but
+  //   it's unclear how to share it effectively.
+
+  MessageSizeCounts result = { ZERO * WORDS, 0 };
+
+  switch (elementSize) {
+    case ElementSize::VOID:
+      // Nothing.
+      break;
+    case ElementSize::BIT:
+    case ElementSize::BYTE:
+    case ElementSize::TWO_BYTES:
+    case ElementSize::FOUR_BYTES:
+    case ElementSize::EIGHT_BYTES:
+      result.addWords(WireHelpers::roundBitsUpToWords(
+          upgradeBound<uint64_t>(elementCount) * dataBitsPerElement(elementSize)));
+      break;
+    case ElementSize::POINTER: {
+      auto count = elementCount * (POINTERS / ELEMENTS);
+      result.addWords(count * WORDS_PER_POINTER);
+
+      for (auto i: kj::zeroTo(count)) {
+        result += WireHelpers::totalSize(segment, reinterpret_cast<const WirePointer*>(ptr) + i,
+                                         nestingLimit);
+      }
+      break;
+    }
+    case ElementSize::INLINE_COMPOSITE: {
+      // Don't forget to count the tag word.
+      auto wordSize = upgradeBound<uint64_t>(elementCount) * step / BITS_PER_WORD;
+      result.addWords(wordSize + POINTER_SIZE_IN_WORDS);
+
+      if (structPointerCount > ZERO * POINTERS) {
+        const word* pos = reinterpret_cast<const word*>(ptr);
+        for (auto i KJ_UNUSED: kj::zeroTo(elementCount)) {
+          pos += structDataSize / BITS_PER_WORD;
+
+          for (auto j KJ_UNUSED: kj::zeroTo(structPointerCount)) {
+            result += WireHelpers::totalSize(segment, reinterpret_cast<const WirePointer*>(pos),
+                                             nestingLimit);
+            pos += POINTER_SIZE_IN_WORDS;
+          }
+        }
+      }
+      break;
+    }
+  }
+
+  if (segment != nullptr) {
+    // This traversal should not count against the read limit, because it's highly likely that
+    // the caller is going to traverse the object again, e.g. to copy it.
+    segment->unread(result.wordCount);
+  }
+
+  return result;
 }
 
 CapTableReader* ListReader::getCapTable() {

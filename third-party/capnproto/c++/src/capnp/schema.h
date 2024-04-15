@@ -19,18 +19,28 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 // THE SOFTWARE.
 
-#ifndef CAPNP_SCHEMA_H_
-#define CAPNP_SCHEMA_H_
-
-#if defined(__GNUC__) && !defined(CAPNP_HEADER_WARNINGS)
-#pragma GCC system_header
-#endif
+#pragma once
 
 #if CAPNP_LITE
 #error "Reflection APIs, including this header, are not available in lite mode."
 #endif
 
+#undef CONST
+// For some ridiculous reason, Windows defines CONST to const. We have an enum value called CONST
+// in schema.capnp.h, so if this is defined, compilation is gonna fail. So we undef it because
+// that seems strictly better than failing entirely. But this could cause trouble for people later
+// on if they, say, include windows.h, then include schema.h, then include another windows API
+// header that uses CONST. I suppose they may have to re-#define CONST in between, or change the
+// header ordering. Sorry.
+//
+// Please don't file a bug report telling us to change our enum naming style. You are at least
+// seven years too late.
+
 #include <capnp/schema.capnp.h>
+#include <kj/hash.h>
+#include <kj/windows-sanity.h>  // work-around macro conflict with `VOID`
+
+CAPNP_BEGIN_HEADER
 
 namespace capnp {
 
@@ -82,7 +92,7 @@ public:
   // Get the encoded schema node content as a single message segment.  It is safe to read as an
   // unchecked message.
 
-  Schema getDependency(uint64_t id) const KJ_DEPRECATED("Does not handle generics correctly.");
+  Schema getDependency(uint64_t id) const CAPNP_DEPRECATED("Does not handle generics correctly.");
   // DEPRECATED: This method cannot correctly account for generic type parameter bindings that
   //   may apply to the dependency. Instead of using this method, use a method of the Schema API
   //   that corresponds to the exact kind of dependency. For example, to get a field type, use
@@ -129,6 +139,8 @@ public:
   // you want to check if two Schemas represent the same type (but possibly different versions of
   // it), compare their IDs instead.
 
+  inline uint hashCode() const { return kj::hashCode(raw); }
+
   template <typename T>
   void requireUsableAs() const;
   // Throws an exception if a value with this Schema cannot safely be cast to a native value of
@@ -139,6 +151,9 @@ public:
 
   kj::StringPtr getShortDisplayName() const;
   // Get the short version of the node's display name.
+
+  const kj::StringPtr getUnqualifiedName() const;
+  // Get the display name "nickname" of this node minus the prefix
 
 private:
   const _::RawBrandedSchema* raw;
@@ -257,6 +272,9 @@ public:
   // there is no such field.  (If the schema does not represent a union or a struct containing
   // an unnamed union, then this always returns null.)
 
+  bool isStreamResult() const;
+  // Convenience method to check if this is the result type of a streaming RPC method.
+
 private:
   StructSchema(Schema base): Schema(base) {}
   template <typename T> static inline StructSchema fromImpl() {
@@ -302,6 +320,7 @@ public:
 
   inline bool operator==(const Field& other) const;
   inline bool operator!=(const Field& other) const { return !(*this == other); }
+  inline uint hashCode() const;
 
 private:
   StructSchema parent;
@@ -400,6 +419,7 @@ public:
 
   inline bool operator==(const Enumerant& other) const;
   inline bool operator!=(const Enumerant& other) const { return !(*this == other); }
+  inline uint hashCode() const;
 
 private:
   EnumSchema parent;
@@ -486,12 +506,16 @@ public:
   inline uint16_t getOrdinal() const { return ordinal; }
   inline uint getIndex() const { return ordinal; }
 
+  bool isStreaming() const { return getResultType().isStreamResult(); }
+  // Check if this is a streaming method.
+
   StructSchema getParamType() const;
   StructSchema getResultType() const;
   // Get the parameter and result types, including substituting generic parameters.
 
   inline bool operator==(const Method& other) const;
   inline bool operator!=(const Method& other) const { return !(*this == other); }
+  inline uint hashCode() const;
 
 private:
   InterfaceSchema parent;
@@ -599,6 +623,8 @@ public:
 
   template <typename T>
   inline static Type from();
+  template <typename T>
+  inline static Type from(T&& value);
 
   inline schema::Type::Which which() const;
 
@@ -642,7 +668,7 @@ public:
   bool operator==(const Type& other) const;
   inline bool operator!=(const Type& other) const { return !(*this == other); }
 
-  size_t hashCode() const;
+  uint hashCode() const;
 
   inline Type wrapInList(uint depth = 1) const;
   // Return the Type formed by wrapping this type in List() `depth` times.
@@ -680,6 +706,9 @@ private:
 
   void requireUsableAs(Type expected) const;
 
+  template <typename T, Kind k>
+  struct FromValueImpl;
+
   friend class ListSchema;  // only for requireUsableAs()
 };
 
@@ -701,7 +730,7 @@ public:
   // Construct the schema for a list of the given type.
 
   static ListSchema of(schema::Type::Reader elementType, Schema context)
-      KJ_DEPRECATED("Does not handle generics correctly.");
+      CAPNP_DEPRECATED("Does not handle generics correctly.");
   // DEPRECATED: This method cannot correctly account for generic type parameter bindings that
   //   may apply to the input type. Instead of using this method, use a method of the Schema API
   //   that corresponds to the exact kind of dependency. For example, to get a field type, use
@@ -789,6 +818,16 @@ inline bool EnumSchema::Enumerant::operator==(const Enumerant& other) const {
 }
 inline bool InterfaceSchema::Method::operator==(const Method& other) const {
   return parent == other.parent && ordinal == other.ordinal;
+}
+
+inline uint StructSchema::Field::hashCode() const {
+  return kj::hashCode(parent, index);
+}
+inline uint EnumSchema::Enumerant::hashCode() const {
+  return kj::hashCode(parent, ordinal);
+}
+inline uint InterfaceSchema::Method::hashCode() const {
+  return kj::hashCode(parent, ordinal);
 }
 
 inline ListSchema ListSchema::of(StructSchema elementType) {
@@ -899,6 +938,29 @@ inline schema::Type::AnyPointer::Unconstrained::Which Type::whichAnyPointerKind(
 template <typename T>
 inline Type Type::from() { return Type(Schema::from<T>()); }
 
+template <typename T, Kind k>
+struct Type::FromValueImpl {
+  template <typename U>
+  static inline Type type(U&& value) {
+    return Type::from<T>();
+  }
+};
+
+template <typename T>
+struct Type::FromValueImpl<T, Kind::OTHER> {
+  template <typename U>
+  static inline Type type(U&& value) {
+    // All dynamic types have getSchema().
+    return value.getSchema();
+  }
+};
+
+template <typename T>
+inline Type Type::from(T&& value) {
+  typedef FromAny<kj::Decay<T>> Base;
+  return Type::FromValueImpl<Base, kind<Base>()>::type(kj::fwd<T>(value));
+}
+
 inline bool Type::isVoid   () const { return baseType == schema::Type::VOID     && listDepth == 0; }
 inline bool Type::isBool   () const { return baseType == schema::Type::BOOL     && listDepth == 0; }
 inline bool Type::isInt8   () const { return baseType == schema::Type::INT8     && listDepth == 0; }
@@ -931,4 +993,4 @@ inline Type Type::wrapInList(uint depth) const {
 
 }  // namespace capnp
 
-#endif  // CAPNP_SCHEMA_H_
+CAPNP_END_HEADER

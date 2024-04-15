@@ -1,17 +1,9 @@
-#include "data.h"
-
-#ifdef ERROR
-#undef ERROR
-#endif
-
-#ifdef VOID
-#undef VOID
-#endif
-
 #include "serialize.capnp.h"
 #include <capnp/message.h>
 #include <capnp/serialize-packed.h>
 #include <kj/exception.h>
+
+#include "data.h"
 
 using namespace ::capnp;
 using namespace Retro;

@@ -19,15 +19,12 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 // THE SOFTWARE.
 
-#ifndef CAPNP_EZ_RPC_H_
-#define CAPNP_EZ_RPC_H_
-
-#if defined(__GNUC__) && !defined(CAPNP_HEADER_WARNINGS)
-#pragma GCC system_header
-#endif
+#pragma once
 
 #include "rpc.h"
 #include "message.h"
+
+CAPNP_BEGIN_HEADER
 
 struct sockaddr;
 
@@ -130,10 +127,10 @@ public:
   // Get the server's main (aka "bootstrap") interface.
 
   template <typename Type>
-  typename Type::Client importCap(kj::StringPtr name)
-      KJ_DEPRECATED("Change your server to export a main interface, then use getMain() instead.");
-  Capability::Client importCap(kj::StringPtr name)
-      KJ_DEPRECATED("Change your server to export a main interface, then use getMain() instead.");
+  typename Type::Client importCap(kj::StringPtr name) CAPNP_DEPRECATED(
+      "Change your server to export a main interface, then use getMain() instead.");
+  Capability::Client importCap(kj::StringPtr name) CAPNP_DEPRECATED(
+      "Change your server to export a main interface, then use getMain() instead.");
   // ** DEPRECATED **
   //
   // Ask the sever for the capability with the given name.  You may specify a type to automatically
@@ -198,12 +195,12 @@ public:
 
   explicit EzRpcServer(kj::StringPtr bindAddress, uint defaultPort = 0,
                        ReaderOptions readerOpts = ReaderOptions())
-      KJ_DEPRECATED("Please specify a main interface for your server.");
+      CAPNP_DEPRECATED("Please specify a main interface for your server.");
   EzRpcServer(struct sockaddr* bindAddress, uint addrSize,
               ReaderOptions readerOpts = ReaderOptions())
-      KJ_DEPRECATED("Please specify a main interface for your server.");
+      CAPNP_DEPRECATED("Please specify a main interface for your server.");
   EzRpcServer(int socketFd, uint port, ReaderOptions readerOpts = ReaderOptions())
-      KJ_DEPRECATED("Please specify a main interface for your server.");
+      CAPNP_DEPRECATED("Please specify a main interface for your server.");
 
   ~EzRpcServer() noexcept(false);
 
@@ -251,4 +248,4 @@ inline typename Type::Client EzRpcClient::importCap(kj::StringPtr name) {
 
 }  // namespace capnp
 
-#endif  // CAPNP_EZ_RPC_H_
+CAPNP_END_HEADER

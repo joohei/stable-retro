@@ -38,15 +38,12 @@
 // - A multi-segment message can be read entirely in three system calls with no buffering.
 // - The format is appropriate for mmap()ing since all data is aligned.
 
-#ifndef CAPNP_SERIALIZE_H_
-#define CAPNP_SERIALIZE_H_
-
-#if defined(__GNUC__) && !defined(CAPNP_HEADER_WARNINGS)
-#pragma GCC system_header
-#endif
+#pragma once
 
 #include "message.h"
 #include <kj/io.h>
+
+CAPNP_BEGIN_HEADER
 
 namespace capnp {
 
@@ -172,7 +169,7 @@ void writeMessage(kj::OutputStream& output, kj::ArrayPtr<const kj::ArrayPtr<cons
 // Specializations for reading from / writing to file descriptors.
 
 class StreamFdMessageReader: private kj::FdInputStream, public InputStreamMessageReader {
-  // A MessageReader that reads from a steam-based file descriptor.
+  // A MessageReader that reads from a stream-based file descriptor.
 
 public:
   StreamFdMessageReader(int fd, ReaderOptions options = ReaderOptions(),
@@ -234,4 +231,4 @@ inline void writeMessageToFd(int fd, MessageBuilder& builder) {
 
 }  // namespace capnp
 
-#endif  // SERIALIZE_H_
+CAPNP_END_HEADER

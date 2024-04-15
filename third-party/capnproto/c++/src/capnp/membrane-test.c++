@@ -88,10 +88,19 @@ protected:
     context.getResults().setThing(context.getParams().getThing());
     return kj::READY_NOW;
   }
+
+  kj::Promise<void> waitForever(WaitForeverContext context) override {
+    context.allowCancellation();
+    return kj::NEVER_DONE;
+  }
 };
 
 class MembranePolicyImpl: public MembranePolicy, public kj::Refcounted {
 public:
+  MembranePolicyImpl() = default;
+  MembranePolicyImpl(kj::Maybe<kj::Promise<void>> revokePromise)
+      : revokePromise(revokePromise.map([](kj::Promise<void>& p) { return p.fork(); })) {}
+
   kj::Maybe<Capability::Client> inboundCall(uint64_t interfaceId, uint16_t methodId,
                                             Capability::Client target) override {
     if (interfaceId == capnp::typeId<Thing>() && methodId == 1) {
@@ -113,6 +122,15 @@ public:
   kj::Own<MembranePolicy> addRef() override {
     return kj::addRef(*this);
   }
+
+  kj::Maybe<kj::Promise<void>> onRevoked() override {
+    return revokePromise.map([](kj::ForkedPromise<void>& fork) {
+      return fork.addBranch();
+    });
+  }
+
+private:
+  kj::Maybe<kj::ForkedPromise<void>> revokePromise;
 };
 
 void testThingImpl(kj::WaitScope& waitScope, test::TestMembrane::Client membraned,
@@ -258,26 +276,55 @@ KJ_TEST("apply membrane using copyOutOfMembrane() on AnyPointer") {
   }, "inside", "inbound", "inside", "inside");
 }
 
+KJ_TEST("MembraneHook::whenMoreResolved returns same value even when called concurrently.") {
+  TestEnv env;
+
+  auto paf = kj::newPromiseAndFulfiller<test::TestMembrane::Client>();
+  test::TestMembrane::Client promCap(kj::mv(paf.promise));
+
+  auto prom = promCap.whenResolved();
+  prom = prom.then([promCap = kj::mv(promCap), &env]() mutable {
+    auto membraned = membrane(kj::mv(promCap), env.policy->addRef());
+    auto hook = ClientHook::from(membraned);
+
+    auto arr = kj::heapArrayBuilder<kj::Promise<kj::Own<ClientHook>>>(2);
+    arr.add(KJ_ASSERT_NONNULL(hook->whenMoreResolved()));
+    arr.add(KJ_ASSERT_NONNULL(hook->whenMoreResolved()));
+
+    return kj::joinPromises(arr.finish()).attach(kj::mv(hook));
+  }).then([](kj::Vector<kj::Own<ClientHook>> hooks) {
+    auto first = hooks[0].get();
+    auto second = hooks[1].get();
+    KJ_ASSERT(first == second);
+  }).eagerlyEvaluate(nullptr);
+
+  auto newClient = kj::heap<TestMembraneImpl>();
+  paf.fulfiller->fulfill(kj::mv(newClient));
+  prom.wait(env.waitScope);
+}
+
 struct TestRpcEnv {
-  kj::AsyncIoContext io;
+  kj::EventLoop loop;
+  kj::WaitScope waitScope;
   kj::TwoWayPipe pipe;
   TwoPartyClient client;
   TwoPartyClient server;
   test::TestMembrane::Client membraned;
 
-  TestRpcEnv()
-      : io(kj::setupAsyncIo()),
-        pipe(io.provider->newTwoWayPipe()),
+  TestRpcEnv(kj::Maybe<kj::Promise<void>> revokePromise = nullptr)
+      : waitScope(loop),
+        pipe(kj::newTwoWayPipe()),
         client(*pipe.ends[0]),
         server(*pipe.ends[1],
-               membrane(kj::heap<TestMembraneImpl>(), kj::refcounted<MembranePolicyImpl>()),
+               membrane(kj::heap<TestMembraneImpl>(),
+                        kj::refcounted<MembranePolicyImpl>(kj::mv(revokePromise))),
                rpc::twoparty::Side::SERVER),
         membraned(client.bootstrap().castAs<test::TestMembrane>()) {}
 
   void testThing(kj::Function<Thing::Client()> makeThing,
                  kj::StringPtr localPassThrough, kj::StringPtr localIntercept,
                  kj::StringPtr remotePassThrough, kj::StringPtr remoteIntercept) {
-    testThingImpl(io.waitScope, membraned, kj::mv(makeThing),
+    testThingImpl(waitScope, membraned, kj::mv(makeThing),
                   localPassThrough, localIntercept, remotePassThrough, remoteIntercept);
   }
 };
@@ -285,7 +332,7 @@ struct TestRpcEnv {
 KJ_TEST("call remote object inside membrane") {
   TestRpcEnv env;
   env.testThing([&]() {
-    return env.membraned.makeThingRequest().send().wait(env.io.waitScope).getThing();
+    return env.membraned.makeThingRequest().send().wait(env.waitScope).getThing();
   }, "inside", "inbound", "inside", "inside");
 }
 
@@ -317,7 +364,7 @@ KJ_TEST("call remote capability that has passed into and back out of membrane") 
   env.testThing([&]() {
     auto req = env.membraned.loopbackRequest();
     req.setThing(kj::heap<ThingImpl>("outside"));
-    return req.send().wait(env.io.waitScope).getThing();
+    return req.send().wait(env.waitScope).getThing();
   }, "outside", "outside", "outside", "outbound");
 }
 
@@ -328,6 +375,35 @@ KJ_TEST("call remote promise pointing into membrane that eventually resolves to 
     req.setThing(kj::heap<ThingImpl>("outside"));
     return req.send().getThing();
   }, "outside", "outside", "outside", "outbound");
+}
+
+KJ_TEST("revoke membrane") {
+  auto paf = kj::newPromiseAndFulfiller<void>();
+
+  TestRpcEnv env(kj::mv(paf.promise));
+
+  auto thing = env.membraned.makeThingRequest().send().wait(env.waitScope).getThing();
+
+  auto callPromise = env.membraned.waitForeverRequest().send();
+
+  KJ_EXPECT(!callPromise.poll(env.waitScope));
+
+  paf.fulfiller->reject(KJ_EXCEPTION(DISCONNECTED, "foobar"));
+
+  // TRICKY: We need to use .ignoreResult().wait() below because when compiling with
+  //   -fno-exceptions, void waits throw recoverable exceptions while non-void waits necessarily
+  //   throw fatal exceptions... but testing for fatal exceptions when exceptions are disabled
+  //   involves fork()ing the process to run the code so if it has side effects on file descriptors
+  //   then we'll get in a bad state...
+
+  KJ_ASSERT(callPromise.poll(env.waitScope));
+  KJ_EXPECT_THROW_RECOVERABLE_MESSAGE("foobar", callPromise.ignoreResult().wait(env.waitScope));
+
+  KJ_EXPECT_THROW_RECOVERABLE_MESSAGE("foobar",
+      env.membraned.makeThingRequest().send().ignoreResult().wait(env.waitScope));
+
+  KJ_EXPECT_THROW_RECOVERABLE_MESSAGE("foobar",
+      thing.passThroughRequest().send().ignoreResult().wait(env.waitScope));
 }
 
 }  // namespace

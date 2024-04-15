@@ -19,17 +19,14 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 // THE SOFTWARE.
 
-#ifndef CAPNP_BLOB_H_
-#define CAPNP_BLOB_H_
-
-#if defined(__GNUC__) && !defined(CAPNP_HEADER_WARNINGS)
-#pragma GCC system_header
-#endif
+#pragma once
 
 #include <kj/common.h>
 #include <kj/string.h>
 #include "common.h"
 #include <string.h>
+
+CAPNP_BEGIN_HEADER
 
 namespace capnp {
 
@@ -102,7 +99,9 @@ public:
   inline Builder(kj::Array<byte>& value): ArrayPtr<byte>(value) {}
   inline Builder(ArrayPtr<byte> value): ArrayPtr<byte>(value) {}
 
-  inline Data::Reader asReader() const { return Data::Reader(*this); }
+  inline Data::Reader asReader() const {
+    return Data::Reader(kj::implicitCast<const kj::ArrayPtr<byte>&>(*this));
+  }
   inline operator Reader() const { return asReader(); }
 };
 
@@ -217,4 +216,4 @@ inline kj::ArrayPtr<char> Text::Builder::slice(size_t start, size_t end) {
 
 }  // namespace capnp
 
-#endif  // CAPNP_BLOB_H_
+CAPNP_END_HEADER

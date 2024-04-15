@@ -19,14 +19,20 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 // THE SOFTWARE.
 
-#ifndef CAPNP_COMPAT_JSON_H_
-#define CAPNP_COMPAT_JSON_H_
+#pragma once
 
 #include <capnp/schema.h>
 #include <capnp/dynamic.h>
 #include <capnp/compat/json.capnp.h>
 
+CAPNP_BEGIN_HEADER
+
 namespace capnp {
+
+typedef json::Value JsonValue;
+// For backwards-compatibility.
+//
+// TODO(cleanup): Consider replacing all uses of JsonValue with json::Value?
 
 class JsonCodec {
   // Flexible class for encoding Cap'n Proto types as JSON, and decoding JSON back to Cap'n Proto.
@@ -50,15 +56,13 @@ class JsonCodec {
   // - 64-bit integers are encoded as strings, since JSON "numbers" are double-precision floating
   //   points which cannot store a 64-bit integer without losing data.
   // - NaNs and infinite floating point numbers are not allowed by the JSON spec, and so are encoded
-  //   as null. This matches the behavior of `JSON.stringify` in at least Firefox and Chrome.
+  //   as strings.
   // - Data is encoded as an array of numbers in the range [0,255]. You probably want to register
   //   a handler that does something better, like maybe base64 encoding, but there are a zillion
   //   different ways people do this.
   // - Encoding/decoding capabilities and AnyPointers requires registering a Handler, since there's
   //   no obvious default behavior.
-  // - When decoding, unrecognized field names are ignored. Note: This means that JSON is NOT a
-  //   good format for receiving input from a human. Consider `capnp eval` or the SchemaParser
-  //   library for human input.
+  // - When decoding, fields with unknown names are ignored by default to allow schema evolution.
 
 public:
   JsonCodec();
@@ -75,8 +79,19 @@ public:
   // Set maximum nesting depth when decoding JSON to prevent highly nested input from overflowing
   // the call stack. The default is 64.
 
+  void setHasMode(HasMode mode);
+  // Normally, primitive field values are always included even if they are equal to the default
+  // value (HasMode::NON_NULL -- only null pointers are omitted). You can use
+  // setHasMode(HasMode::NON_DEFAULT) to specify that default-valued primitive fields should be
+  // omitted as well.
+
+  void setRejectUnknownFields(bool enable);
+  // Choose whether decoding JSON with unknown fields should produce an error. You may trade
+  // allowing schema evolution against a guarantee that all data is preserved when decoding JSON
+  // by toggling this option. The default is to ignore unknown fields.
+
   template <typename T>
-  kj::String encode(T&& value);
+  kj::String encode(T&& value) const;
   // Encode any Cap'n Proto value to JSON, including primitives and
   // Dynamic{Enum,Struct,List,Capability}, but not DynamicValue (see below).
 
@@ -126,7 +141,7 @@ public:
   // Translate JsonValue <-> text.
 
   template <typename T>
-  void encode(T&& value, JsonValue::Builder output);
+  void encode(T&& value, JsonValue::Builder output) const;
   void encode(DynamicValue::Reader input, Type type, JsonValue::Builder output) const;
   void decode(JsonValue::Reader input, DynamicStruct::Builder output) const;
   template <typename T>
@@ -193,27 +208,68 @@ public:
   void addFieldHandler(StructSchema::Field field, Handler<T>& handler);
   // Matches only the specific field. T can be a dynamic type. T must match the field's type.
 
+  void handleByAnnotation(Schema schema);
+  template <typename T> void handleByAnnotation();
+  // Inspects the given type (as specified by type parameter or dynamic schema) and all its
+  // dependencies looking for JSON annotations (see json.capnp), building and registering Handlers
+  // based on these annotations.
+  //
+  // If you'd like to use annotations to control JSON, you must call these functions before you
+  // start using the codec. They are not loaded "on demand" because that would require mutex
+  // locking.
+
+  // ---------------------------------------------------------------------------
+  // Hack to support string literal parameters
+
+  template <size_t size, typename... Params>
+  auto decode(const char (&input)[size], Params&&... params) const
+      -> decltype(decode(kj::arrayPtr(input, size), kj::fwd<Params>(params)...)) {
+    return decode(kj::arrayPtr(input, size - 1), kj::fwd<Params>(params)...);
+  }
+  template <size_t size, typename... Params>
+  auto decodeRaw(const char (&input)[size], Params&&... params) const
+      -> decltype(decodeRaw(kj::arrayPtr(input, size), kj::fwd<Params>(params)...)) {
+    return decodeRaw(kj::arrayPtr(input, size - 1), kj::fwd<Params>(params)...);
+  }
+
 private:
   class HandlerBase;
+  class AnnotatedHandler;
+  class AnnotatedEnumHandler;
+  class Base64Handler;
+  class HexHandler;
+  class JsonValueHandler;
   struct Impl;
 
   kj::Own<Impl> impl;
 
   void encodeField(StructSchema::Field field, DynamicValue::Reader input,
                    JsonValue::Builder output) const;
-  void decodeArray(List<JsonValue>::Reader input, DynamicList::Builder output) const;
-  void decodeObject(List<JsonValue::Field>::Reader input, DynamicStruct::Builder output) const;
+  Orphan<DynamicList> decodeArray(List<JsonValue>::Reader input, ListSchema type, Orphanage orphanage) const;
+  void decodeObject(JsonValue::Reader input, StructSchema type, Orphanage orphanage, DynamicStruct::Builder output) const;
+  void decodeField(StructSchema::Field fieldSchema, JsonValue::Reader fieldValue,
+                   Orphanage orphanage, DynamicStruct::Builder output) const;
   void addTypeHandlerImpl(Type type, HandlerBase& handler);
   void addFieldHandlerImpl(StructSchema::Field field, Type type, HandlerBase& handler);
+
+  AnnotatedHandler& loadAnnotatedHandler(
+      StructSchema schema,
+      kj::Maybe<json::DiscriminatorOptions::Reader> discriminator,
+      kj::Maybe<kj::StringPtr> unionDeclName,
+      kj::Vector<Schema>& dependencies);
 };
 
 // =======================================================================================
 // inline implementation details
 
+template <bool isDynamic>
+struct EncodeImpl;
+
 template <typename T>
-kj::String JsonCodec::encode(T&& value) {
+kj::String JsonCodec::encode(T&& value) const {
+  Type type = Type::from(value);
   typedef FromAny<kj::Decay<T>> Base;
-  return encode(DynamicValue::Reader(ReaderFor<Base>(kj::fwd<T>(value))), Type::from<Base>());
+  return encode(DynamicValue::Reader(ReaderFor<Base>(kj::fwd<T>(value))), type);
 }
 
 template <typename T>
@@ -247,9 +303,15 @@ inline DynamicEnum JsonCodec::decode(kj::ArrayPtr<const char> input, EnumSchema 
 // -----------------------------------------------------------------------------
 
 template <typename T>
-void JsonCodec::encode(T&& value, JsonValue::Builder output) {
+void JsonCodec::encode(T&& value, JsonValue::Builder output) const {
   typedef FromAny<kj::Decay<T>> Base;
   encode(DynamicValue::Reader(ReaderFor<Base>(kj::fwd<T>(value))), Type::from<Base>(), output);
+}
+
+template <>
+inline void JsonCodec::encode<DynamicStruct::Reader>(
+      DynamicStruct::Reader&& value, JsonValue::Builder output) const {
+  encode(DynamicValue::Reader(value), value.getSchema(), output);
 }
 
 template <typename T>
@@ -457,6 +519,11 @@ template <> void JsonCodec::addTypeHandler(Handler<DynamicCapability>& handler)
 // TODO(someday): Implement support for registering handlers that cover thinsg like "all structs"
 //   or "all lists". Currently you can only target a specific struct or list type.
 
+template <typename T>
+void JsonCodec::handleByAnnotation() {
+  return handleByAnnotation(Schema::from<T>());
+}
+
 } // namespace capnp
 
-#endif // CAPNP_COMPAT_JSON_H_
+CAPNP_END_HEADER

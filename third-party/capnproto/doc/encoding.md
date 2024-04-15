@@ -119,6 +119,44 @@ Field offsets are computed by the Cap'n Proto compiler.  The precise algorithm i
 to describe here, but you need not implement it yourself, as the compiler can produce a compiled
 schema format which includes offset information.
 
+#### Default Values
+
+A default struct is always all-zeros.  To achieve this, fields in the data section are stored xor'd
+with their defined default values.  An all-zero pointer is considered "null"; accessor methods
+for pointer fields check for null and return a pointer to their default value in this case.
+
+There are several reasons why this is desirable:
+
+* Cap'n Proto messages are often "packed" with a simple compression algorithm that deflates
+  zero-value bytes.
+* Newly-allocated structs only need to be zero-initialized, which is fast and requires no knowledge
+  of the struct type except its size.
+* If a newly-added field is placed in space that was previously padding, messages written by old
+  binaries that do not know about this field will still have its default value set correctly --
+  because it is always zero.
+
+#### Zero-sized structs.
+
+As stated above, a pointer whose bits are all zero is considered a null pointer, *not* a struct of
+zero size. To encode a struct of zero size, set A, C, and D to zero, and set B (the offset) to -1.
+
+**Historical explanation:** A null pointer is intended to be treated as equivalent to the field's
+default value. Early on, it was thought that a zero-sized struct was a suitable synonym for
+null, since interpreting an empty struct as any struct type results in a struct whose fields are
+all default-valued. So, the pointer encoding was designed such that a zero-sized struct's pointer
+would be all-zero, so that it could conveniently be overloaded to mean "null".
+
+However, it turns out there are two important differences between a zero-sized struct and a null
+pointer. First, applications often check for null explicitly when implementing optional fields.
+Second, an empty struct is technically equivalent to the default value for the struct *type*,
+whereas a null pointer is equivalent to the default value for the particular *field*. These are
+not necessarily the same.
+
+It therefore became necessary to find a different encoding for zero-sized structs. Since the
+struct has zero size, the pointer's offset can validly point to any location so long as it is
+in-bounds. Since an offset of -1 points to the beginning of the pointer itself, it is known to
+be in-bounds. So, we use an offset of -1 when the struct has zero size.
+
 ### Lists
 
 A list value is encoded as a pointer to a flat array of values.
@@ -140,7 +178,9 @@ A list value is encoded as a pointer to a flat array of values.
         5 = 8 bytes (non-pointer)
         6 = 8 bytes (pointer)
         7 = composite (see below)
-    D (29 bits) = Number of elements in the list, except when C is 7
+    D (29 bits) = Size of the list:
+        when C <> 7: Number of elements in the list.
+        when C = 7: Number of words in the list, not counting the tag word
         (see below).
 
 The pointed-to values are tightly-packed.  In particular, `Bool`s are packed bit-by-bit in
@@ -173,23 +213,6 @@ possible to upgrade a list of primitives to a list of structs, as described unde
 unreasonable implementation burden.) Note that even though struct lists can be decoded from any
 element size (except C = 1), it is NOT permitted to encode a struct list using any type other than
 C = 7 because doing so would interfere with the [canonicalization algorithm](#canonicalization).
-
-#### Default Values
-
-A default struct is always all-zeros.  To achieve this, fields in the data section are stored xor'd
-with their defined default values.  An all-zero pointer is considered "null" (such a pointer would
-otherwise point to a zero-size struct, which might as well be considered null); accessor methods
-for pointer fields check for null and return a pointer to their default value in this case.
-
-There are several reasons why this is desirable:
-
-* Cap'n Proto messages are often "packed" with a simple compression algorithm that deflates
-  zero-value bytes.
-* Newly-allocated structs only need to be zero-initialized, which is fast and requires no knowledge
-  of the struct type except its size.
-* If a newly-added field is placed in space that was previously padding, messages written by old
-  binaries that do not know about this field will still have its default value set correctly --
-  because it is always zero.
 
 ### Inter-Segment Pointers
 
@@ -245,7 +268,7 @@ A capability pointer, then, simply contains an index into the separate capabilit
     C (32 bits) = Index of the capability in the message's capability
         table.
 
-In [rpc.capnp](https://github.com/sandstorm-io/capnproto/blob/master/c++/src/capnp/rpc.capnp), the
+In [rpc.capnp](https://github.com/capnproto/capnproto/blob/master/c++/src/capnp/rpc.capnp), the
 capability table is encoded as a list of `CapDescriptors`, appearing along-side the message content
 in the `Payload` struct.  However, some use cases may call for different approaches.  A message
 that is built and consumed within the same process need not encode the capability table at all
@@ -351,6 +374,10 @@ A canonical Cap'n Proto message must adhere to the following rules:
 * Similarly, for a struct list, if a trailing word in a section of all structs in the list is zero,
   then it must be truncated from all structs in the list. (All structs in a struct list must have
   equal sizes, hence a trailing zero can only be removed if it is zero in all elements.)
+* Any struct pointer pointing to a zero-sized struct should have an
+  offset of -1.
+  * Note that this applies _only_ to structs; other zero-sized values should have offsets
+    allocated in preorder, as normal.
 * Canonical messages are not packed. However, packing can still be applied for transmission
   purposes; the message must simply be unpacked before checking signatures.
 
@@ -388,7 +415,7 @@ different limit if desired. Another reasonable strategy is to set the limit to s
 the original message size; however, most applications should place limits on overall message sizes
 anyway, so it makes sense to have one check cover both.
 
-**List amplification:** A list of `Void` values or zero-size structs can have a very large element count while taking constant space on the wire. If the receiving application expects a list of structs, it will see these zero-sized elements as valid structs set to their default values. If it iterates through the list processing each element, it could spend a large amount of CPU time or other resources despite the message being small. To defend against this, the "traversal limit" should count a list of zero-sized elements as if each element were one word instead. This rule was introduced in the C++ implementation in [commit 1048706](https://github.com/sandstorm-io/capnproto/commit/104870608fde3c698483fdef6b97f093fc15685d).
+**List amplification:** A list of `Void` values or zero-size structs can have a very large element count while taking constant space on the wire. If the receiving application expects a list of structs, it will see these zero-sized elements as valid structs set to their default values. If it iterates through the list processing each element, it could spend a large amount of CPU time or other resources despite the message being small. To defend against this, the "traversal limit" should count a list of zero-sized elements as if each element were one word instead. This rule was introduced in the C++ implementation in [commit 1048706](https://github.com/capnproto/capnproto/commit/104870608fde3c698483fdef6b97f093fc15685d).
 
 ### Stack overflow DoS attack
 

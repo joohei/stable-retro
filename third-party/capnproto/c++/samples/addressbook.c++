@@ -23,12 +23,12 @@
 //
 // If Cap'n Proto is installed, build the sample like:
 //   capnp compile -oc++ addressbook.capnp
-//   c++ -std=c++11 -Wall addressbook.c++ addressbook.capnp.c++ `pkg-config --cflags --libs capnp` -o addressbook
+//   c++ -std=c++14 -Wall addressbook.c++ addressbook.capnp.c++ `pkg-config --cflags --libs capnp` -o addressbook
 //
 // If Cap'n Proto is not installed, but the source is located at $SRC and has been
 // compiled in $BUILD (often both are simply ".." from here), you can do:
 //   $BUILD/capnp compile -I$SRC/src -o$BUILD/capnpc-c++ addressbook.capnp
-//   c++ -std=c++11 -Wall addressbook.c++ addressbook.capnp.c++ -I$SRC/src -L$BUILD/.libs -lcapnp -lkj -o addressbook
+//   c++ -std=c++14 -Wall addressbook.c++ addressbook.capnp.c++ -I$SRC/src -L$BUILD/.libs -lcapnp -lkj -o addressbook
 //
 // Run like:
 //   ./addressbook write | ./addressbook read
@@ -112,6 +112,8 @@ void printAddressBook(int fd) {
     }
   }
 }
+
+#if !CAPNP_LITE
 
 #include "addressbook.capnp.h"
 #include <capnp/message.h>
@@ -260,8 +262,9 @@ void dynamicPrintMessage(int fd, StructSchema schema) {
   std::cout << std::endl;
 }
 
+#endif  // !CAPNP_LITE
+
 int main(int argc, char* argv[]) {
-  StructSchema schema = Schema::from<AddressBook>();
   if (argc != 2) {
     std::cerr << "Missing arg." << std::endl;
     return 1;
@@ -269,13 +272,18 @@ int main(int argc, char* argv[]) {
     writeAddressBook(1);
   } else if (strcmp(argv[1], "read") == 0) {
     printAddressBook(0);
+#if !CAPNP_LITE
   } else if (strcmp(argv[1], "dwrite") == 0) {
+    StructSchema schema = Schema::from<AddressBook>();
     dynamicWriteAddressBook(1, schema);
   } else if (strcmp(argv[1], "dread") == 0) {
+    StructSchema schema = Schema::from<AddressBook>();
     dynamicPrintMessage(0, schema);
+#endif
   } else {
     std::cerr << "Invalid arg: " << argv[1] << std::endl;
     return 1;
   }
   return 0;
 }
+

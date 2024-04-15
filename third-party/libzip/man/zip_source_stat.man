@@ -1,3 +1,35 @@
+.\" Automatically generated from an mdoc input file.  Do not edit.
+.\" zip_source_stat.mdoc -- get information about zip source
+.\" Copyright (C) 2014-2021 Dieter Baron and Thomas Klausner
+.\"
+.\" This file is part of libzip, a library to manipulate ZIP archives.
+.\" The authors can be contacted at <info@libzip.org>
+.\"
+.\" Redistribution and use in source and binary forms, with or without
+.\" modification, are permitted provided that the following conditions
+.\" are met:
+.\" 1. Redistributions of source code must retain the above copyright
+.\"    notice, this list of conditions and the following disclaimer.
+.\" 2. Redistributions in binary form must reproduce the above copyright
+.\"    notice, this list of conditions and the following disclaimer in
+.\"    the documentation and/or other materials provided with the
+.\"    distribution.
+.\" 3. The names of the authors may not be used to endorse or promote
+.\"    products derived from this software without specific prior
+.\"    written permission.
+.\"
+.\" THIS SOFTWARE IS PROVIDED BY THE AUTHORS ``AS IS'' AND ANY EXPRESS
+.\" OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+.\" WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+.\" ARE DISCLAIMED.  IN NO EVENT SHALL THE AUTHORS BE LIABLE FOR ANY
+.\" DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+.\" DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE
+.\" GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+.\" INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER
+.\" IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
+.\" OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN
+.\" IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+.\"
 .TH "ZIP_SOURCE_STAT" "3" "December 18, 2017" "NiH" "Library Functions Manual"
 .nh
 .if n .ad l
@@ -58,32 +90,32 @@ Check if the flag defined by the following defines are in
 before accessing the fields:
 .RS 6n
 .PD 0
-.TP 37n
-\fRZIP_SOURCE_STAT_NAME\fR
+.TP 30n
+\fRZIP_STAT_NAME\fR
 \fIname\fR
-.TP 37n
-\fRZIP_SOURCE_STAT_INDEX\fR
+.TP 30n
+\fRZIP_STAT_INDEX\fR
 \fIindex\fR
-.TP 37n
-\fRZIP_SOURCE_STAT_SIZE\fR
+.TP 30n
+\fRZIP_STAT_SIZE\fR
 \fIsize\fR
-.TP 37n
-\fRZIP_SOURCE_STAT_COMP_SIZE\fR
+.TP 30n
+\fRZIP_STAT_COMP_SIZE\fR
 \fIcomp_size\fR
-.TP 37n
-\fRZIP_SOURCE_STAT_MTIME\fR
+.TP 30n
+\fRZIP_STAT_MTIME\fR
 \fImtime\fR
-.TP 37n
-\fRZIP_SOURCE_STAT_CRC\fR
+.TP 30n
+\fRZIP_STAT_CRC\fR
 \fIcrc\fR
-.TP 37n
-\fRZIP_SOURCE_STAT_COMP_METHOD\fR
+.TP 30n
+\fRZIP_STAT_COMP_METHOD\fR
 \fIcomp_method\fR
-.TP 37n
-\fRZIP_SOURCE_STAT_ENCRYPTION_METHOD\fR
+.TP 30n
+\fRZIP_STAT_ENCRYPTION_METHOD\fR
 \fIencryption_method\fR
-.TP 37n
-\fRZIP_SOURCE_STAT_FLAGS\fR
+.TP 30n
+\fRZIP_STAT_FLAGS\fR
 \fIflags\fR
 .RE
 .PD

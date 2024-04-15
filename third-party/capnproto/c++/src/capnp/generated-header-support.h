@@ -21,12 +21,7 @@
 
 // This file is included from all generated headers.
 
-#ifndef CAPNP_GENERATED_HEADER_SUPPORT_H_
-#define CAPNP_GENERATED_HEADER_SUPPORT_H_
-
-#if defined(__GNUC__) && !defined(CAPNP_HEADER_WARNINGS)
-#pragma GCC system_header
-#endif
+#pragma once
 
 #include "raw-schema.h"
 #include "layout.h"
@@ -36,6 +31,9 @@
 #include "any.h"
 #include <kj/string.h>
 #include <kj/string-tree.h>
+#include <kj/hash.h>
+
+CAPNP_BEGIN_HEADER
 
 namespace capnp {
 
@@ -317,7 +315,7 @@ inline constexpr uint sizeInWords() {
 
 }  // namespace capnp
 
-#if _MSC_VER
+#if _MSC_VER && !defined(__clang__)
 // MSVC doesn't understand floating-point constexpr yet.
 //
 // TODO(msvc): Remove this hack when MSVC is fixed.
@@ -328,7 +326,7 @@ inline constexpr uint sizeInWords() {
 #define CAPNP_NON_INT_CONSTEXPR_DEF_INIT(value)
 #endif
 
-#if _MSC_VER
+#if _MSC_VER && !defined(__clang__)
 // TODO(msvc): A little hack to allow MSVC to use C++14 return type deduction in cases where the
 // explicit type exposes bugs in the compiler.
 #define CAPNP_AUTO_IF_MSVC(...) auto
@@ -351,8 +349,8 @@ inline constexpr uint sizeInWords() {
       static inline ::capnp::word const* encodedSchema() { return bp_##id; } \
     }
 
-#if _MSC_VER
-// TODO(msvc): MSVC dosen't expect constexprs to have definitions.
+#if _MSC_VER && !defined(__clang__)
+// TODO(msvc): MSVC doesn't expect constexprs to have definitions.
 #define CAPNP_DEFINE_ENUM(type, id)
 #else
 #define CAPNP_DEFINE_ENUM(type, id) \
@@ -404,4 +402,12 @@ inline constexpr uint sizeInWords() {
 
 #endif  // CAPNP_LITE, else
 
-#endif  // CAPNP_GENERATED_HEADER_SUPPORT_H_
+namespace capnp {
+namespace schemas {
+CAPNP_DECLARE_SCHEMA(995f9a3377c0b16e);
+// HACK: Forward-declare the RawSchema for StreamResult, from stream.capnp. This allows capnp
+//   files which declare streaming methods to avoid including stream.capnp.h.
+}
+}
+
+CAPNP_END_HEADER

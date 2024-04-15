@@ -1,4 +1,36 @@
-.TH "ZIP_SOURCE_FUNCTION" "3" "December 18, 2017" "NiH" "Library Functions Manual"
+.\" Automatically generated from an mdoc input file.  Do not edit.
+.\" zip_source_function.mdoc -- create data source from function
+.\" Copyright (C) 2004-2022 Dieter Baron and Thomas Klausner
+.\"
+.\" This file is part of libzip, a library to manipulate ZIP archives.
+.\" The authors can be contacted at <info@libzip.org>
+.\"
+.\" Redistribution and use in source and binary forms, with or without
+.\" modification, are permitted provided that the following conditions
+.\" are met:
+.\" 1. Redistributions of source code must retain the above copyright
+.\"    notice, this list of conditions and the following disclaimer.
+.\" 2. Redistributions in binary form must reproduce the above copyright
+.\"    notice, this list of conditions and the following disclaimer in
+.\"    the documentation and/or other materials provided with the
+.\"    distribution.
+.\" 3. The names of the authors may not be used to endorse or promote
+.\"    products derived from this software without specific prior
+.\"    written permission.
+.\"
+.\" THIS SOFTWARE IS PROVIDED BY THE AUTHORS ``AS IS'' AND ANY EXPRESS
+.\" OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+.\" WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+.\" ARE DISCLAIMED.  IN NO EVENT SHALL THE AUTHORS BE LIABLE FOR ANY
+.\" DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+.\" DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE
+.\" GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+.\" INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER
+.\" IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
+.\" OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN
+.\" IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+.\"
+.TH "ZIP_SOURCE_FUNCTION" "3" "January 5, 2023" "NiH" "Library Functions Manual"
 .nh
 .if n .ad l
 .SH "NAME"
@@ -28,7 +60,7 @@ The functions
 \fBzip_source_function\fR()
 and
 \fBzip_source_function_create\fR()
-creates a zip source from the user-provided function
+create a zip source from the user-provided function
 \fIfn\fR,
 which must be of the following type:
 .PP
@@ -67,6 +99,12 @@ Must support
 \fRZIP_SOURCE_STAT\fR,
 and
 \fRZIP_SOURCE_ERROR\fR.
+.sp
+If your source uses any allocated memory (including
+\fIuserdata\fR)
+it should also implement
+\fRZIP_SOURCE_FREE\fR
+to avoid memory leaks.
 .TP 24n
 seekable read source
 Same as previous, but from a source allowing reading from arbitrary
@@ -88,6 +126,17 @@ Must additionally support
 \fRZIP_SOURCE_TELL_WRITE\fR,
 and
 \fRZIP_SOURCE_REMOVE\fR.
+.sp
+On top of the above, supporting the pseudo-command
+\fRZIP_SOURCE_SUPPORTS_REOPEN\fR
+allows calling
+\fBzip_source_open\fR()
+again after calling
+\fBzip_source_close\fR().
+.SS "\fRZIP_SOURCE_ACCEPT_EMPTY\fR"
+Return 1 if an empty source should be accepted as a valid zip archive.
+This is the default if this command is not supported by a source.
+File system backed sources should return 0.
 .SS "\fRZIP_SOURCE_BEGIN_WRITE\fR"
 Prepare the source for writing.
 Use this to create any temporary file(s).
@@ -127,6 +176,65 @@ Otherwise, return 2 * sizeof(int).
 Clean up and free all resources, including
 \fIuserdata\fR.
 The callback function will not be called again.
+.SS "\fRZIP_SOURCE_GET_FILE_ATTRIBUTES\fR"
+Provide information about various data.
+Then the data should be put in the appropriate entry in the passed
+\fIzip_file_attributes_t\fR
+argument, and the appropriate
+\fRZIP_FILE_ATTRIBUTES_*\fR
+value must be or'ed into the
+\fIvalid\fR
+member to denote that the corresponding data has been provided.
+A
+\fIzip_file_attributes_t\fR
+structure can be initialized using
+zip_file_attributes_init(3).
+.TP 12n
+ASCII mode
+If a file is a plaintext file in ASCII.
+Can be used by extraction tools to automatically convert line endings
+(part of the internal file attributes).
+Member
+\fIascii\fR,
+flag
+\fRZIP_FILE_ATTRIBUTES_ASCII\fR.
+.TP 12n
+General Purpose Bit Flags (limited to Compression Flags)
+The general purpose bit flag in the zip in the local and central
+directory headers contain information about the compression method.
+Member
+\fIgeneral_purpose_bit_flags\fR
+and
+\fIgeneral_purpose_bit_mask\fR
+to denote which members have been set;
+flag
+\fRZIP_FILE_ATTRIBUTES_GENERAL_PURPOSE_BIT_FLAGS\fR.
+.TP 12n
+External File Attributes
+The external file attributes (usually operating system-specific).
+Member
+\fIexternal_file_attributes\fR,
+flag
+\fRZIP_FILE_ATTRIBUTES_EXTERNAL_FILE_ATTRIBUTES\fR.
+.TP 12n
+Version Needed
+A minimum version needed required to unpack this entry (in the usual
+"major * 10 + minor" format).
+Member
+\fIversion_needed\fR,
+flag
+\fRZIP_FILE_ATTRIBUTES_VERSION_NEEDED\fR.
+.TP 12n
+Operating System
+One of the operating systems as defined by the
+\fRZIP_OPSYS_*\fR
+variables (see
+\fIzip.h\fR).
+This value affects the interpretation of the external file attributes.
+Member
+\fIhost_system\fR,
+flag
+\fRZIP_FILE_ATTRIBUTES_HOST_SYSTEM\fR.
 .SS "\fRZIP_SOURCE_OPEN\fR"
 Prepare for reading.
 .SS "\fRZIP_SOURCE_READ\fR"
@@ -221,6 +329,9 @@ ftell(3).
 .SS "\fRZIP_SOURCE_WRITE\fR"
 Write data to the source.
 Return number of bytes written.
+.SS "\fRZIP_SOURCE_SUPPORTS_REOPEN\fR"
+This command is never actually invoked, support for it signals the
+ability to handle multiple open/read/close cycles.
 .SS "Return Values"
 Commands should return \-1 on error.
 \fRZIP_SOURCE_ERROR\fR
@@ -257,6 +368,9 @@ or
 \fRZIP_SOURCE_ROLLBACK_WRITE\fR
 will be called.
 .PP
+\fRZIP_SOURCE_ACCEPT_EMPTY\fR,
+\fRZIP_SOURCE_GET_FILE_ATTRIBUTES\fR,
+and
 \fRZIP_SOURCE_STAT\fR
 can be issued at any time.
 .PP
@@ -299,8 +413,9 @@ fails if:
 Required memory could not be allocated.
 .SH "SEE ALSO"
 libzip(3),
-zip_add(3),
-zip_replace(3),
+zip_file_add(3),
+zip_file_attributes_init(3),
+zip_file_replace(3),
 zip_source(3),
 zip_stat_init(3)
 .SH "HISTORY"

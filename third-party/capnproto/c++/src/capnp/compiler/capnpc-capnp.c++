@@ -22,6 +22,10 @@
 // This program is a code generator plugin for `capnp compile` which writes the schema back to
 // stdout in roughly capnpc format.
 
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
+
 #include <capnp/schema.capnp.h>
 #include "../serialize.h"
 #include <kj/debug.h>
@@ -35,6 +39,7 @@
 #include <kj/main.h>
 #include <algorithm>
 #include <map>
+#include <capnp/stream.capnp.h>
 
 #if HAVE_CONFIG_H
 #include "config.h"
@@ -489,7 +494,9 @@ private:
 
   kj::StringTree genParamList(InterfaceSchema interface, StructSchema schema,
                               schema::Brand::Reader brand, InterfaceSchema::Method method) {
-    if (schema.getProto().getScopeId() == 0) {
+    if (schema.getProto().getId() == typeId<StreamResult>()) {
+      return kj::strTree("stream");
+    } else if (schema.getProto().getScopeId() == 0) {
       // A named parameter list.
       return kj::strTree("(", kj::StringTree(
           KJ_MAP(field, schema.getFields()) {

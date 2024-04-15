@@ -1,18 +1,19 @@
+cmake_minimum_required(VERSION 3.6)
 project("Cap'n Proto" CXX)
-cmake_minimum_required(VERSION 3.1)
-set(VERSION 0.6.1)
+set(VERSION 0.10.4)
 
-set(CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
+list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 
+include(CTest)
 include(CheckIncludeFileCXX)
 include(GNUInstallDirs)
 if(MSVC)
-  check_include_file_cxx(initializer_list HAS_CXX11)
+  check_include_file_cxx(initializer_list HAS_CXX14)
 else()
-  check_include_file_cxx(initializer_list HAS_CXX11 "-std=gnu++0x")
+  check_include_file_cxx(initializer_list HAS_CXX14 "-std=gnu++1y")
 endif()
-if(NOT HAS_CXX11)
-  message(SEND_ERROR "Requires a C++11 compiler and standard library.")
+if(NOT HAS_CXX14)
+  message(SEND_ERROR "Requires a C++14 compiler and standard library.")
 endif()
 
 # these arguments are passed to all install(TARGETS) calls
@@ -25,7 +26,6 @@ set(INSTALL_TARGETS_DEFAULT_ARGS
 
 # Options ======================================================================
 
-option(BUILD_TESTING "Build unit tests and enable CTest 'check' target." ON)
 option(EXTERNAL_CAPNP "Use the system capnp binary, or the one specified in $CAPNP, instead of using the compiled one." OFF)
 option(CAPNP_LITE "Compile Cap'n Proto in 'lite mode', in which all reflection APIs (schema.h, dynamic.h, etc.) are not included. Produces a smaller library at the cost of features. All programs built against the library must be compiled with -DCAPNP_LITE. Requires EXTERNAL_CAPNP." OFF)
 
@@ -39,6 +39,73 @@ if(CAPNP_LITE)
   # This flag is attached as PUBLIC target_compile_definition to kj target
 else()
   set(CAPNP_LITE_FLAG)
+endif()
+
+set(WITH_OPENSSL "AUTO" CACHE STRING
+  "Whether or not to build libkj-tls by linking against openssl")
+# define list of values GUI will offer for the variable
+set_property(CACHE WITH_OPENSSL PROPERTY STRINGS AUTO ON OFF)
+
+# shadow cache variable original value with ON/OFF,
+# so from now on OpenSSL-specific code just has to check:
+#     if (WITH_OPENSSL)
+#         ...
+#     endif()
+if (CAPNP_LITE)
+  set(WITH_OPENSSL OFF)
+elseif (WITH_OPENSSL STREQUAL "AUTO")
+  find_package(OpenSSL COMPONENTS Crypto SSL)
+  if (OPENSSL_FOUND)
+    set(WITH_OPENSSL ON)
+  else()
+    set(WITH_OPENSSL OFF)
+  endif()
+elseif (WITH_OPENSSL)
+  find_package(OpenSSL REQUIRED COMPONENTS Crypto SSL)
+endif()
+
+set(WITH_FIBERS "AUTO" CACHE STRING
+  "Whether or not to build libkj-async with fibers")
+# define list of values GUI will offer for the variable
+set_property(CACHE WITH_FIBERS PROPERTY STRINGS AUTO ON OFF)
+
+# CapnProtoConfig.cmake.in needs this variable.
+set(_WITH_LIBUCONTEXT OFF)
+
+if (WITH_FIBERS OR WITH_FIBERS STREQUAL "AUTO")
+  set(_capnp_fibers_found OFF)
+  if (WIN32 OR CYGWIN)
+    set(_capnp_fibers_found ON)
+  else()
+    # Fibers need makecontext, setcontext, getcontext, swapcontext that may be in libc,
+    # or in libucontext (e.g. for musl).
+    # We assume that makecontext implies that the others are present.
+    include(CheckLibraryExists)
+    check_library_exists(c makecontext "" HAVE_UCONTEXT_LIBC)
+    if (HAVE_UCONTEXT_LIBC)
+      set(_capnp_fibers_found ON)
+    else()
+      # Try with libucontext
+      find_package(PkgConfig)
+      if (PKG_CONFIG_FOUND)
+        pkg_check_modules(libucontext IMPORTED_TARGET libucontext)
+        if (libucontext_FOUND)
+          set(_WITH_LIBUCONTEXT ON)
+          set(_capnp_fibers_found ON)
+        endif()
+      else()
+        set(_capnp_fibers_found OFF)
+      endif()
+    endif()
+  endif()
+
+  if (_capnp_fibers_found)
+    set(WITH_FIBERS ON)
+  elseif(WITH_FIBERS STREQUAL "AUTO")
+    set(WITH_FIBERS OFF)
+  else()
+    message(FATAL_ERROR "Missing 'makecontext', 'getcontext', 'setcontext' or 'swapcontext' symbol in libc and no libucontext found: KJ won't be able to build with fibers. Disable fibers (-DWITH_FIBERS=OFF).")
+  endif()
 endif()
 
 if(MSVC)
@@ -66,7 +133,7 @@ else()
   add_compile_options(-Wall -Wextra -Wno-strict-aliasing -Wno-sign-compare -Wno-unused-parameter)
 
   if(DEFINED CMAKE_CXX_EXTENSIONS AND NOT CMAKE_CXX_EXTENSIONS)
-    message(SEND_ERROR "Cap'n Proto requires compiler-specific extensions (e.g., -std=gnu++11). Please leave CMAKE_CXX_EXTENSIONS undefined or ON.")
+    message(SEND_ERROR "Cap'n Proto requires compiler-specific extensions (e.g., -std=gnu++14). Please leave CMAKE_CXX_EXTENSIONS undefined or ON.")
   endif()
 
   if (NOT ANDROID)
@@ -81,11 +148,17 @@ add_subdirectory(src)
 # Install ======================================================================
 
 include(CMakePackageConfigHelpers)
-write_basic_package_version_file(
-  "${CMAKE_CURRENT_BINARY_DIR}/cmake/CapnProtoConfigVersion.cmake"
-  VERSION ${VERSION}
-  COMPATIBILITY AnyNewerVersion
-)
+
+# We used to use write_basic_package_version_file(), but since the autotools build needs to install
+# a config version script as well, I copied the AnyNewerVersion template from my CMake Modules
+# directory to Cap'n Proto's cmake/ directory (alternatively, we could make the autotools build
+# depend on CMake).
+#
+# We might as well use the local copy of the template. In the future we can modify the project's
+# version compatibility policy just by changing that file.
+set(PACKAGE_VERSION ${VERSION})
+configure_file(cmake/CapnProtoConfigVersion.cmake.in cmake/CapnProtoConfigVersion.cmake @ONLY)
+
 set(CONFIG_PACKAGE_LOCATION ${CMAKE_INSTALL_LIBDIR}/cmake/CapnProto)
 
 configure_package_config_file(cmake/CapnProtoConfig.cmake.in
@@ -120,22 +193,29 @@ if(NOT MSVC)  # Don't install pkg-config files when building with MSVC
   set(PTHREAD_CFLAGS "-pthread")
   set(STDLIB_FLAG)  # TODO: Unsupported
 
-  configure_file(kj.pc.in "${CMAKE_CURRENT_BINARY_DIR}/kj.pc" @ONLY)
-  install(FILES "${CMAKE_CURRENT_BINARY_DIR}/kj.pc" DESTINATION "${CMAKE_INSTALL_LIBDIR}/pkgconfig")
-
-  configure_file(capnp.pc.in "${CMAKE_CURRENT_BINARY_DIR}/capnp.pc" @ONLY)
-  install(FILES "${CMAKE_CURRENT_BINARY_DIR}/capnp.pc" DESTINATION "${CMAKE_INSTALL_LIBDIR}/pkgconfig")
+  set(CAPNP_PKG_CONFIG_FILES
+    pkgconfig/kj.pc
+    pkgconfig/capnp.pc
+    pkgconfig/capnpc.pc
+  )
 
   if(NOT CAPNP_LITE)
-    configure_file(kj-async.pc.in "${CMAKE_CURRENT_BINARY_DIR}/kj-async.pc" @ONLY)
-    install(FILES "${CMAKE_CURRENT_BINARY_DIR}/kj-async.pc" DESTINATION "${CMAKE_INSTALL_LIBDIR}/pkgconfig")
-
-    configure_file(capnp-rpc.pc.in "${CMAKE_CURRENT_BINARY_DIR}/capnp-rpc.pc" @ONLY)
-    install(FILES "${CMAKE_CURRENT_BINARY_DIR}/capnp-rpc.pc" DESTINATION "${CMAKE_INSTALL_LIBDIR}/pkgconfig")
-
-    configure_file(capnp-json.pc.in "${CMAKE_CURRENT_BINARY_DIR}/capnp-json.pc" @ONLY)
-    install(FILES "${CMAKE_CURRENT_BINARY_DIR}/capnp-json.pc" DESTINATION "${CMAKE_INSTALL_LIBDIR}/pkgconfig")
+    list(APPEND CAPNP_PKG_CONFIG_FILES
+      pkgconfig/kj-async.pc
+      pkgconfig/kj-gzip.pc
+      pkgconfig/kj-http.pc
+      pkgconfig/kj-test.pc
+      pkgconfig/kj-tls.pc
+      pkgconfig/capnp-rpc.pc
+      pkgconfig/capnp-websocket.pc
+      pkgconfig/capnp-json.pc
+    )
   endif()
+
+  foreach(pcfile ${CAPNP_PKG_CONFIG_FILES})
+    configure_file(${pcfile}.in "${CMAKE_CURRENT_BINARY_DIR}/${pcfile}" @ONLY)
+    install(FILES "${CMAKE_CURRENT_BINARY_DIR}/${pcfile}" DESTINATION "${CMAKE_INSTALL_LIBDIR}/pkgconfig")
+  endforeach()
 
   unset(STDLIB_FLAG)
   unset(PTHREAD_CFLAGS)

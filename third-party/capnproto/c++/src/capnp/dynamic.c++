@@ -180,7 +180,7 @@ DynamicValue::Reader DynamicStruct::Reader::get(StructSchema::Field field) const
     case schema::Field::SLOT: {
       auto slot = proto.getSlot();
 
-      // Note that the default value might be "anyPointer" even if the type is some poniter type
+      // Note that the default value might be "anyPointer" even if the type is some pointer type
       // *other than* anyPointer. This happens with generics -- the field is actually a generic
       // parameter that has been bound, but the default value was of course compiled without any
       // binding available.
@@ -272,7 +272,7 @@ DynamicValue::Builder DynamicStruct::Builder::get(StructSchema::Field field) {
     case schema::Field::SLOT: {
       auto slot = proto.getSlot();
 
-      // Note that the default value might be "anyPointer" even if the type is some poniter type
+      // Note that the default value might be "anyPointer" even if the type is some pointer type
       // *other than* anyPointer. This happens with generics -- the field is actually a generic
       // parameter that has been bound, but the default value was of course compiled without any
       // binding available.
@@ -414,7 +414,7 @@ DynamicValue::Pipeline DynamicStruct::Pipeline::get(StructSchema::Field field) {
   KJ_UNREACHABLE;
 }
 
-bool DynamicStruct::Reader::has(StructSchema::Field field) const {
+bool DynamicStruct::Reader::has(StructSchema::Field field, HasMode mode) const {
   KJ_REQUIRE(field.getContainingStruct() == schema, "`field` is not a field of this struct.");
 
   auto proto = field.getProto();
@@ -441,20 +441,35 @@ bool DynamicStruct::Reader::has(StructSchema::Field field) const {
 
   switch (type.which()) {
     case schema::Type::VOID:
+      // Void is always equal to the default.
+      return mode == HasMode::NON_NULL;
+
     case schema::Type::BOOL:
+      return mode == HasMode::NON_NULL ||
+          reader.getDataField<bool>(assumeDataOffset(slot.getOffset()), 0) != 0;
+
     case schema::Type::INT8:
-    case schema::Type::INT16:
-    case schema::Type::INT32:
-    case schema::Type::INT64:
     case schema::Type::UINT8:
+      return mode == HasMode::NON_NULL ||
+          reader.getDataField<uint8_t>(assumeDataOffset(slot.getOffset()), 0) != 0;
+
+    case schema::Type::INT16:
     case schema::Type::UINT16:
-    case schema::Type::UINT32:
-    case schema::Type::UINT64:
-    case schema::Type::FLOAT32:
-    case schema::Type::FLOAT64:
     case schema::Type::ENUM:
-      // Primitive types are always present.
-      return true;
+      return mode == HasMode::NON_NULL ||
+          reader.getDataField<uint16_t>(assumeDataOffset(slot.getOffset()), 0) != 0;
+
+    case schema::Type::INT32:
+    case schema::Type::UINT32:
+    case schema::Type::FLOAT32:
+      return mode == HasMode::NON_NULL ||
+          reader.getDataField<uint32_t>(assumeDataOffset(slot.getOffset()), 0) != 0;
+
+    case schema::Type::INT64:
+    case schema::Type::UINT64:
+    case schema::Type::FLOAT64:
+      return mode == HasMode::NON_NULL ||
+          reader.getDataField<uint64_t>(assumeDataOffset(slot.getOffset()), 0) != 0;
 
     case schema::Type::TEXT:
     case schema::Type::DATA:
@@ -725,6 +740,7 @@ DynamicValue::Builder DynamicStruct::Builder::init(StructSchema::Field field, ui
               (uint)type.which());
           break;
       }
+      KJ_UNREACHABLE;
     }
 
     case schema::Field::GROUP:
@@ -985,11 +1001,11 @@ DynamicValue::Builder DynamicStruct::Builder::get(kj::StringPtr name) {
 DynamicValue::Pipeline DynamicStruct::Pipeline::get(kj::StringPtr name) {
   return get(schema.getFieldByName(name));
 }
-bool DynamicStruct::Reader::has(kj::StringPtr name) const {
-  return has(schema.getFieldByName(name));
+bool DynamicStruct::Reader::has(kj::StringPtr name, HasMode mode) const {
+  return has(schema.getFieldByName(name), mode);
 }
-bool DynamicStruct::Builder::has(kj::StringPtr name) {
-  return has(schema.getFieldByName(name));
+bool DynamicStruct::Builder::has(kj::StringPtr name, HasMode mode) {
+  return has(schema.getFieldByName(name), mode);
 }
 void DynamicStruct::Builder::set(kj::StringPtr name, const DynamicValue::Reader& value) {
   set(schema.getFieldByName(name), value);
@@ -1451,6 +1467,14 @@ DynamicValue::Reader::Reader(ConstSchema constant): type(VOID) {
   }
 }
 
+#if __GNUC__ && !__clang__ && __GNUC__ >= 9
+// In the copy constructors below, we use memcpy() to copy only after verifying that it is safe.
+// But GCC 9 doesn't know we've checked, and whines. I suppose GCC is probably right: our checks
+// probably don't technically make memcpy safe according to the standard. But it works in practice,
+// and if it ever stops working, the tests will catch it.
+#pragma GCC diagnostic ignored "-Wclass-memaccess"
+#endif
+
 DynamicValue::Reader::Reader(const Reader& other) {
   switch (other.type) {
     case UNKNOWN:
@@ -1709,11 +1733,32 @@ int64_t unsignedToSigned<int64_t>(unsigned long long value) {
 
 template <typename T, typename U>
 T checkRoundTrip(U value) {
-  KJ_REQUIRE(T(value) == value, "Value out-of-range for requested type.", value) {
+  T result = value;
+  KJ_REQUIRE(U(result) == value, "Value out-of-range for requested type.", value) {
     // Use it anyway.
     break;
   }
-  return value;
+  return result;
+}
+
+template <typename T, typename U>
+T checkRoundTripFromFloat(U value) {
+  // When `U` is `float` or `double`, we have to use a different approach, because casting an
+  // out-of-range float to an integer is, surprisingly, UB.
+  constexpr T MIN = kj::minValue;
+  constexpr T MAX = kj::maxValue;
+  KJ_REQUIRE(value >= U(MIN), "Value out-of-range for requested type.", value) {
+    return MIN;
+  }
+  KJ_REQUIRE(value <= U(MAX), "Value out-of-range for requested type.", value) {
+    return MAX;
+  }
+  T result = value;
+  KJ_REQUIRE(U(result) == value, "Value out-of-range for requested type.", value) {
+    // Use it anyway.
+    break;
+  }
+  return result;
 }
 
 }  // namespace
@@ -1748,14 +1793,14 @@ typeName DynamicValue::Builder::AsImpl<typeName>::apply(Builder& builder) { \
   } \
 }
 
-HANDLE_NUMERIC_TYPE(int8_t, checkRoundTrip, unsignedToSigned, checkRoundTrip)
-HANDLE_NUMERIC_TYPE(int16_t, checkRoundTrip, unsignedToSigned, checkRoundTrip)
-HANDLE_NUMERIC_TYPE(int32_t, checkRoundTrip, unsignedToSigned, checkRoundTrip)
-HANDLE_NUMERIC_TYPE(int64_t, kj::implicitCast, unsignedToSigned, checkRoundTrip)
-HANDLE_NUMERIC_TYPE(uint8_t, signedToUnsigned, checkRoundTrip, checkRoundTrip)
-HANDLE_NUMERIC_TYPE(uint16_t, signedToUnsigned, checkRoundTrip, checkRoundTrip)
-HANDLE_NUMERIC_TYPE(uint32_t, signedToUnsigned, checkRoundTrip, checkRoundTrip)
-HANDLE_NUMERIC_TYPE(uint64_t, signedToUnsigned, kj::implicitCast, checkRoundTrip)
+HANDLE_NUMERIC_TYPE(int8_t, checkRoundTrip, unsignedToSigned, checkRoundTripFromFloat)
+HANDLE_NUMERIC_TYPE(int16_t, checkRoundTrip, unsignedToSigned, checkRoundTripFromFloat)
+HANDLE_NUMERIC_TYPE(int32_t, checkRoundTrip, unsignedToSigned, checkRoundTripFromFloat)
+HANDLE_NUMERIC_TYPE(int64_t, kj::implicitCast, unsignedToSigned, checkRoundTripFromFloat)
+HANDLE_NUMERIC_TYPE(uint8_t, signedToUnsigned, checkRoundTrip, checkRoundTripFromFloat)
+HANDLE_NUMERIC_TYPE(uint16_t, signedToUnsigned, checkRoundTrip, checkRoundTripFromFloat)
+HANDLE_NUMERIC_TYPE(uint32_t, signedToUnsigned, checkRoundTrip, checkRoundTripFromFloat)
+HANDLE_NUMERIC_TYPE(uint64_t, signedToUnsigned, kj::implicitCast, checkRoundTripFromFloat)
 HANDLE_NUMERIC_TYPE(float, kj::implicitCast, kj::implicitCast, kj::implicitCast)
 HANDLE_NUMERIC_TYPE(double, kj::implicitCast, kj::implicitCast, kj::implicitCast)
 

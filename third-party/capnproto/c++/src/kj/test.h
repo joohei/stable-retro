@@ -19,16 +19,14 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 // THE SOFTWARE.
 
-#ifndef KJ_TEST_H_
-#define KJ_TEST_H_
-
-#if defined(__GNUC__) && !KJ_HEADER_WARNINGS
-#pragma GCC system_header
-#endif
+#pragma once
 
 #include "debug.h"
 #include "vector.h"
 #include "function.h"
+#include "windows-sanity.h"  // work-around macro conflict with `ERROR`
+
+KJ_BEGIN_HEADER
 
 namespace kj {
 
@@ -62,24 +60,26 @@ private:
   } KJ_UNIQUE_NAME(testCase); \
   void KJ_UNIQUE_NAME(TestCase)::run()
 
-#if _MSC_VER
+#if _MSC_VER && !defined(__clang__)
 #define KJ_INDIRECT_EXPAND(m, vargs) m vargs
 #define KJ_FAIL_EXPECT(...) \
   KJ_INDIRECT_EXPAND(KJ_LOG, (ERROR , __VA_ARGS__));
 #define KJ_EXPECT(cond, ...) \
-  if (cond); else KJ_INDIRECT_EXPAND(KJ_FAIL_EXPECT, ("failed: expected " #cond , __VA_ARGS__))
+  if (auto _kjCondition = ::kj::_::MAGIC_ASSERT << cond); \
+  else KJ_INDIRECT_EXPAND(KJ_FAIL_EXPECT, ("failed: expected " #cond , _kjCondition, __VA_ARGS__))
 #else
 #define KJ_FAIL_EXPECT(...) \
   KJ_LOG(ERROR, ##__VA_ARGS__);
 #define KJ_EXPECT(cond, ...) \
-  if (cond); else KJ_FAIL_EXPECT("failed: expected " #cond, ##__VA_ARGS__)
+  if (auto _kjCondition = ::kj::_::MAGIC_ASSERT << cond); \
+  else KJ_FAIL_EXPECT("failed: expected " #cond, _kjCondition, ##__VA_ARGS__)
 #endif
 
 #define KJ_EXPECT_THROW_RECOVERABLE(type, code) \
   do { \
     KJ_IF_MAYBE(e, ::kj::runCatchingExceptions([&]() { code; })) { \
       KJ_EXPECT(e->getType() == ::kj::Exception::Type::type, \
-          "code threw wrong exception type: " #code, e->getType()); \
+          "code threw wrong exception type: " #code, *e); \
     } else { \
       KJ_FAIL_EXPECT("code did not throw: " #code); \
     } \
@@ -89,7 +89,7 @@ private:
   do { \
     KJ_IF_MAYBE(e, ::kj::runCatchingExceptions([&]() { code; })) { \
       KJ_EXPECT(::kj::_::hasSubstring(e->getDescription(), message), \
-          "exception description didn't contain expected substring", e->getDescription()); \
+          "exception description didn't contain expected substring", *e); \
     } else { \
       KJ_FAIL_EXPECT("code did not throw: " #code); \
     } \
@@ -98,7 +98,7 @@ private:
 #if KJ_NO_EXCEPTIONS
 #define KJ_EXPECT_THROW(type, code) \
   do { \
-    KJ_EXPECT(::kj::_::expectFatalThrow(type, nullptr, [&]() { code; })); \
+    KJ_EXPECT(::kj::_::expectFatalThrow(::kj::Exception::Type::type, nullptr, [&]() { code; })); \
   } while (false)
 #define KJ_EXPECT_THROW_MESSAGE(message, code) \
   do { \
@@ -164,4 +164,4 @@ private:
 }  // namespace _ (private)
 }  // namespace kj
 
-#endif // KJ_TEST_H_
+KJ_END_HEADER

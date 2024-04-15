@@ -4,34 +4,11 @@ if(POLICY CMP0048)
   cmake_policy(SET CMP0048 NEW)
 endif()
 
-if(UNIX)
-  set(PYEXT_SUFFIX
-      ".so"
-      CACHE STRING "Suffix for Python extension modules")
-  set(DYNLIB_SUFFIX
-      ".so"
-      CACHE STRING "Suffix for dynamic libraries")
-elseif(APPLE)
-  set(PYEXT_SUFFIX
-      ".so"
-      CACHE STRING "Suffix for Python extension modules")
-  set(DYNLIB_SUFFIX
-      ".dylib"
-      CACHE STRING "Suffix for dynamic libraries")
-elseif(WIN32)
-  set(PYEXT_SUFFIX
-      ".pyd"
-      CACHE STRING "Suffix for Python extension modules" FORCE)
-  set(DYNLIB_SUFFIX
-      ".dll"
-      CACHE STRING "Suffix for dynamic libraries")
-else()
-  message(FATAL_ERROR "Unsupported platform")
-endif()
-
 find_package(Git QUIET)
 
-file(READ "${CMAKE_SOURCE_DIR}/retro/VERSION.txt" PROJECT_VERSION)
+find_package(PythonInterp REQUIRED)
+
+file(READ "${CMAKE_SOURCE_DIR}/retro/VERSION" PROJECT_VERSION)
 string(REGEX REPLACE "\n$" "" PROJECT_VERSION "${PROJECT_VERSION}")
 set_property(
   DIRECTORY
@@ -42,7 +19,6 @@ project("Gym Retro" VERSION ${PROJECT_VERSION})
 set(CMAKE_CXX_STANDARD 14)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
-set(CMAKE_MACOSX_DEPLOYMENT_TARGET 10.7)
 set(CMAKE_CXX_FLAGS
     "${CMAKE_CXX_FLAGS} -Wall -Wextra -Wno-sign-compare -Wno-missing-field-initializers -fvisibility=hidden"
 )
@@ -68,9 +44,7 @@ set(BUILD_PYTHON
 mark_as_advanced(BUILD_PYTHON)
 
 if(BUILD_PYTHON)
-  find_package(Python 3 COMPONENTS Interpreter Development.Module)
-else()
-  find_package(Python 3 COMPONENTS Interpreter)
+  find_package(PythonLibs REQUIRED)
 endif()
 
 if(WIN32 OR BUILD_MANYLINUX)
@@ -93,12 +67,6 @@ if(NOT BUILD_LUAJIT)
 else()
   set(LUA_INCLUDE_DIRS "${CMAKE_SOURCE_DIR}/third-party/luajit/src")
 
-  if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
-    set(LUA_FLAGS ${LUA_FLAGS} CC=${CMAKE_C_COMPILER}
-                  LDFLAGS=-mmacosx-version-min=10.7)
-    set(LUA_CFLAGS -mmacosx-version-min=10.7)
-  endif()
-
   if(CMAKE_SYSTEM_PROCESSOR STREQUAL "x86_64" OR CMAKE_SYSTEM_PROCESSOR
                                                  STREQUAL "AMD64")
     set(LUA_FLAGS ${LUA_FLAGS}
@@ -120,12 +88,22 @@ else()
   set(LUA_LIBRARY "${LUA_INCLUDE_DIRS}/libluajit.a")
   add_custom_command(
     OUTPUT "${LUA_LIBRARY}"
-    COMMAND $(MAKE) ${LUA_FLAGS} libluajit.a
+    COMMAND ${CMAKE_MAKE_PROGRAM} ${LUA_FLAGS} libluajit.a
     WORKING_DIRECTORY "${LUA_INCLUDE_DIRS}")
   add_custom_target(
     clean-luajit
-    COMMAND $(MAKE) clean
+    COMMAND ${CMAKE_MAKE_PROGRAM} clean
     WORKING_DIRECTORY "${LUA_INCLUDE_DIRS}")
+endif()
+
+if(NOT WIN32)
+  set(PYEXT_SUFFIX
+      ".so"
+      CACHE STRING "Suffix for Python extension modules")
+else()
+  set(PYEXT_SUFFIX
+      ".pyd"
+      CACHE STRING "Suffix for Python extension modules" FORCE)
 endif()
 
 if(CMAKE_C_COMPILER_ID STREQUAL "GNU")
@@ -156,11 +134,12 @@ function(add_core platform core_name)
       PARENT_SCOPE)
   set(subdir)
 
-  if(EXISTS "cores/${platform}/Makefile.libretro")
+  if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/cores/${platform}/Makefile.libretro")
     set(makefile Makefile.libretro)
-  elseif(EXISTS "cores/${platform}/Makefile")
+  elseif(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/cores/${platform}/Makefile")
     set(makefile Makefile)
-  elseif(EXISTS "cores/${platform}/libretro/Makefile")
+  elseif(EXISTS
+         "${CMAKE_CURRENT_SOURCE_DIR}/cores/${platform}/libretro/Makefile")
     set(makefile Makefile)
     set(subdir libretro)
   else()
@@ -188,20 +167,19 @@ function(add_core platform core_name)
     set(core_fpic_flags "-fPIC")
   endif()
 
-  if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
-    set(core_fpic_flags
-        "${core_fpic_flags} -mmacosx-version-min=10.7 -stdlib=libc++")
+  if(APPLE)
+    set(core_fpic_flags "${core_fpic_flags} -stdlib=libc++")
   endif()
 
   add_custom_command(
     OUTPUT "${TARGET_PATH}"
     COMMAND
       ${CMAKE_COMMAND} -E env CFLAGS=${core_cflags} CXXFLAGS=${core_cxxflags}
-      LDFLAGS=${core_ldflags} $(MAKE) -f ${makefile} CC="${CMAKE_C_COMPILER}"
-      CXX="${CMAKE_CXX_COMPILER}" fpic=${core_fpic_flags} ${libretro_platform}
-    COMMAND ${CMAKE_COMMAND} -E copy "${core_name}_libretro${DYNLIB_SUFFIX}"
-            "${TARGET_PATH}"
-    WORKING_DIRECTORY "cores/${platform}/${subdir}"
+      LDFLAGS=${core_ldflags} ${CMAKE_MAKE_PROGRAM} -f ${makefile}
+      CC="${CMAKE_C_COMPILER}" CXX="${CMAKE_CXX_COMPILER}"
+      fpic=${core_fpic_flags} ${libretro_platform}
+    COMMAND ${CMAKE_COMMAND} -E copy "${target_name}" "${TARGET_PATH}"
+    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/cores/${platform}/${subdir}"
     DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/retro/cores/${core_name}-version")
   unset(core_ldflags)
   add_custom_command(
@@ -223,9 +201,9 @@ function(add_core platform core_name)
 
   add_custom_target(
     clean-${platform}
-    COMMAND $(MAKE) -f ${makefile} clean
+    COMMAND ${CMAKE_MAKE_PROGRAM} -f ${makefile} clean
     COMMAND ${CMAKE_COMMAND} -E remove "${TARGET_PATH}"
-    WORKING_DIRECTORY "cores/${platform}/${subdir}")
+    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/cores/${platform}/${subdir}")
 endfunction()
 
 add_core(snes snes9x)
@@ -233,8 +211,8 @@ add_core(genesis genesis_plus_gx)
 add_core(nes fceumm)
 add_core(atari2600 stella)
 
-if(APPLE AND CMAKE_SYSTEM_PROCESSOR MATCHES "arm64")
-  message(warning "Detected Apple Silicon, skipping gambatte (gb)")
+if(APPLE)
+  message(WARNING "Detected Apple, skipping gambatte (gb)")
 else()
   add_core(gb gambatte)
 endif()
@@ -274,8 +252,6 @@ if(NOT CAPN_PROTO_FOUND AND NOT BUILD_MANYLINUX)
     add_subdirectory(third-party/capnproto/c++)
   endif()
 endif()
-
-set(CAPN_PROTO_FOUND OFF)
 
 if(CAPN_PROTO_FOUND)
   add_definitions(-DUSE_CAPNP)
@@ -354,8 +330,8 @@ if(CAPN_PROTO_FOUND)
   target_link_libraries(retro-capnp retro-base CapnProto::capnp)
 endif()
 
-include_directories(src retro third-party/pybind11/include third-party
-                    third-party/gtest/googletest/include ${Python_INCLUDE_DIRS})
+include_directories(src third-party/pybind11/include third-party
+                    third-party/gtest/googletest/include ${PYTHON_INCLUDE_DIRS})
 
 if(BUILD_PYTHON)
   add_library(retro SHARED src/retro.cpp)
@@ -375,7 +351,7 @@ if(BUILD_PYTHON)
       add_definitions(-DMS_WIN64)
     endif()
 
-    set(PYBIND_LIBS "${Python_LIBRARY}")
+    set(PYBIND_LIBS "${PYTHON_LIBRARY}")
   endif()
 
   target_link_libraries(retro retro-base ${PYBIND_LIBS} ${STATIC_LDFLAGS})
@@ -383,7 +359,7 @@ endif()
 
 if(BUILD_TESTS)
   enable_testing()
-  add_subdirectory(third-party/gtest/googlemock)
+  add_subdirectory(third-party/gtest)
   add_subdirectory(tests)
 endif()
 

@@ -19,6 +19,14 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 // THE SOFTWARE.
 
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
+
+#if _WIN32
+#include <kj/win32-api-version.h>
+#endif
+
 #include "lexer.h"
 #include "parser.h"
 #include "compiler.h"
@@ -38,11 +46,17 @@
 #include <sys/types.h>
 #include <capnp/serialize.h>
 #include <capnp/serialize-packed.h>
+#include <capnp/serialize-text.h>
+#include <capnp/compat/json.h>
 #include <errno.h>
 #include <stdlib.h>
+#include <kj/map.h>
 
 #if _WIN32
 #include <process.h>
+#include <windows.h>
+#include <kj/windows-sanity.h>
+#undef CONST
 #else
 #include <sys/wait.h>
 #endif
@@ -63,10 +77,10 @@ static const char VERSION_STRING[] = "Cap'n Proto version " VERSION;
 class CompilerMain final: public GlobalErrorReporter {
 public:
   explicit CompilerMain(kj::ProcessContext& context)
-      : context(context), loader(*this) {}
+      : context(context), disk(kj::newDiskFilesystem()), loader(*this) {}
 
   kj::MainFunc getMain() {
-    if (context.getProgramName().endsWith("capnpc")) {
+    if (context.getProgramName().endsWith("capnpc") || context.getProgramName().endsWith("capnpc.exe")) {
       kj::MainBuilder builder(context, VERSION_STRING,
             "Compiles Cap'n Proto schema files and generates corresponding source code in one or "
             "more languages.");
@@ -82,10 +96,12 @@ public:
                             "Generate source code from schema files.")
              .addSubCommand("id", KJ_BIND_METHOD(*this, getGenIdMain),
                             "Generate a new unique ID.")
+             .addSubCommand("convert", KJ_BIND_METHOD(*this, getConvertMain),
+                            "Convert messages between binary, text, JSON, etc.")
              .addSubCommand("decode", KJ_BIND_METHOD(*this, getDecodeMain),
-                            "Decode binary Cap'n Proto message to text.")
+                            "DEPRECATED (use `convert`)")
              .addSubCommand("encode", KJ_BIND_METHOD(*this, getEncodeMain),
-                            "Encode text Cap'n Proto message to binary.")
+                            "DEPRECATED (use `convert`)")
              .addSubCommand("eval", KJ_BIND_METHOD(*this, getEvalMain),
                             "Evaluate a const from a schema file.");
       addGlobalOptions(builder);
@@ -107,6 +123,47 @@ public:
           "Generates a new 64-bit unique ID for use in a Cap'n Proto schema.")
         .callAfterParsing(KJ_BIND_METHOD(*this, generateId))
         .build();
+  }
+
+  kj::MainFunc getConvertMain() {
+    // Only parse the schemas we actually need for decoding.
+    compileEagerness = Compiler::NODE;
+
+    // Drop annotations since we don't need them.  This avoids importing files like c++.capnp.
+    annotationFlag = Compiler::DROP_ANNOTATIONS;
+
+    kj::MainBuilder builder(context, VERSION_STRING,
+          "Converts messages between formats. Reads a stream of messages from stdin in format "
+          "<from> and writes them to stdout in format <to>. Valid formats are:\n"
+          "    binary      standard binary format\n"
+          "    packed      packed binary format (deflates zeroes)\n"
+          "    flat        binary single segment, no segment table (rare)\n"
+          "    flat-packed flat and packed\n"
+          "    canonical   canonicalized binary single segment, no segment table\n"
+          "    text        schema language struct literal format\n"
+          "    json        JSON format\n"
+          "When using \"text\" or \"json\" format, you must specify <schema-file> and <type> "
+          "(but they are ignored and can be omitted for binary-to-binary conversions). "
+          "<type> names names a struct type defined in <schema-file>, which is the root type "
+          "of the message(s).");
+    addGlobalOptions(builder);
+    builder.addOption({"short"}, KJ_BIND_METHOD(*this, printShort),
+               "Write text or JSON output in short (non-pretty) format. Each message will "
+               "be printed on one line, without using whitespace to improve readability.")
+           .addOptionWithArg({"segment-size"}, KJ_BIND_METHOD(*this, setSegmentSize), "<n>",
+               "For binary output, sets the preferred segment size on the MallocMessageBuilder to <n> "
+               "words and turns off heuristic growth.  This flag is mainly useful "
+               "for testing.  Without it, each message will be written as a single "
+               "segment.")
+           .addOption({"quiet"}, KJ_BIND_METHOD(*this, setQuiet),
+               "Do not print warning messages about the input being in the wrong format.  "
+               "Use this if you find the warnings are wrong (but also let us know so "
+               "we can improve them).")
+           .expectArg("<from>:<to>", KJ_BIND_METHOD(*this, setConversion))
+           .expectOptionalArg("<schema-file>", KJ_BIND_METHOD(*this, addSource))
+           .expectOptionalArg("<type>", KJ_BIND_METHOD(*this, setRootType))
+           .callAfterParsing(KJ_BIND_METHOD(*this, convert));
+    return builder.build();
   }
 
   kj::MainFunc getDecodeMain() {
@@ -153,7 +210,7 @@ public:
     kj::MainBuilder builder(context, VERSION_STRING,
           "Encodes one or more textual Cap'n Proto messages to binary.  The messages have root "
           "type <type> defined in <schema-file>.  Messages are read from standard input.  Each "
-          "mesage is a parenthesized struct literal, like the format used to specify constants "
+          "message is a parenthesized struct literal, like the format used to specify constants "
           "and default values of struct type in the schema language.  For example:\n"
           "    (foo = 123, bar = \"hello\", baz = [true, false, true])\n"
           "The input may contain any number of such values; each will be encoded as a separate "
@@ -189,6 +246,9 @@ public:
     // Drop annotations since we don't need them.  This avoids importing files like c++.capnp.
     annotationFlag = Compiler::DROP_ANNOTATIONS;
 
+    // Default convert to text unless -o is given.
+    convertTo = Format::TEXT;
+
     kj::MainBuilder builder(context, VERSION_STRING,
           "Prints (or encodes) the value of <name>, which must be defined in <schema-file>.  "
           "<name> must refer to a const declaration, a field of a struct type (prints the default "
@@ -206,20 +266,19 @@ public:
           "and --flat flags specify binary output, in which case the const must be of struct "
           "type.");
     addGlobalOptions(builder);
-    builder.addOption({'b', "binary"}, KJ_BIND_METHOD(*this, codeBinary),
-                      "Write the output as binary instead of text, using standard Cap'n Proto "
-                      "serialization.  (This writes the message using capnp::writeMessage() "
-                      "from <capnp/serialize.h>.)")
+    builder.addOptionWithArg({'o', "output"}, KJ_BIND_METHOD(*this, setEvalOutputFormat),
+                      "<format>", "Encode the output in the given format. See `capnp help convert` "
+                      "for a list of formats. Defaults to \"text\".")
+           .addOption({'b', "binary"}, KJ_BIND_METHOD(*this, codeBinary),
+                      "same as -obinary")
            .addOption({"flat"}, KJ_BIND_METHOD(*this, codeFlat),
-                      "Write the output as a flat single-segment binary message, with no framing.")
+                      "same as -oflat")
            .addOption({'p', "packed"}, KJ_BIND_METHOD(*this, codePacked),
-                      "Write the output as packed binary instead of text, using standard Cap'n "
-                      "Proto packing, which deflates zero-valued bytes.  (This writes the "
-                      "message using capnp::writePackedMessage() from "
-                      "<capnp/serialize-packed.h>.)")
+                      "same as -opacked")
            .addOption({"short"}, KJ_BIND_METHOD(*this, printShort),
-                      "Print in short (non-pretty) text format.  The message will be printed on "
-                      "one line, without using whitespace to improve readability.")
+                      "If output format is text or JSON, write in short (non-pretty) format. The "
+                      "message will be printed on one line, without using whitespace to improve "
+                      "readability.")
            .expectArg("<schema-file>", KJ_BIND_METHOD(*this, addSource))
            .expectArg("<name>", KJ_BIND_METHOD(*this, evalConst));
     return builder.build();
@@ -258,8 +317,12 @@ public:
   // shared options
 
   kj::MainBuilder::Validity addImportPath(kj::StringPtr path) {
-    loader.addImportPath(kj::heapString(path));
-    return true;
+    KJ_IF_MAYBE(dir, getSourceDirectory(path, false)) {
+      loader.addImportPath(*dir);
+      return true;
+    } else {
+      return "no such directory";
+    }
   }
 
   kj::MainBuilder::Validity noStandardImport() {
@@ -268,53 +331,40 @@ public:
   }
 
   kj::MainBuilder::Validity addSource(kj::StringPtr file) {
-    // Strip redundant "./" prefixes to make src-prefix matching more lenient.
-    while (file.startsWith("./")) {
-      file = file.slice(2);
-
-      // Remove redundant slashes as well (e.g. ".////foo" -> "foo").
-      while (file.startsWith("/")) {
-        file = file.slice(1);
-      }
-    }
-
     if (!compilerConstructed) {
       compiler = compilerSpace.construct(annotationFlag);
       compilerConstructed = true;
     }
 
     if (addStandardImportPaths) {
-      loader.addImportPath(kj::heapString("/usr/local/include"));
-      loader.addImportPath(kj::heapString("/usr/include"));
+      static constexpr kj::StringPtr STANDARD_IMPORT_PATHS[] = {
+        "/usr/local/include"_kj,
+        "/usr/include"_kj,
 #ifdef CAPNP_INCLUDE_DIR
-      loader.addImportPath(kj::heapString(CAPNP_INCLUDE_DIR));
+        KJ_CONCAT(CAPNP_INCLUDE_DIR, _kj),
 #endif
+      };
+      for (auto path: STANDARD_IMPORT_PATHS) {
+        KJ_IF_MAYBE(dir, getSourceDirectory(path, false)) {
+          loader.addImportPath(*dir);
+        } else {
+          // ignore standard path that doesn't exist
+        }
+      }
+
       addStandardImportPaths = false;
     }
 
-    KJ_IF_MAYBE(module, loadModule(file)) {
-      uint64_t id = compiler->add(*module);
-      compiler->eagerlyCompile(id, compileEagerness);
-      sourceFiles.add(SourceFile { id, module->getSourceName(), &*module });
+    auto dirPathPair = interpretSourceFile(file);
+    KJ_IF_MAYBE(module, loader.loadModule(dirPathPair.dir, dirPathPair.path)) {
+      auto compiled = compiler->add(*module);
+      compiler->eagerlyCompile(compiled.getId(), compileEagerness);
+      sourceFiles.add(SourceFile { compiled.getId(), compiled, module->getSourceName(), &*module });
     } else {
       return "no such file";
     }
 
     return true;
-  }
-
-private:
-  kj::Maybe<Module&> loadModule(kj::StringPtr file) {
-    size_t longestPrefix = 0;
-
-    for (auto& prefix: sourcePrefixes) {
-      if (file.startsWith(prefix)) {
-        longestPrefix = kj::max(longestPrefix, prefix.size());
-      }
-    }
-
-    kj::StringPtr canonicalName = file.slice(longestPrefix);
-    return loader.loadModule(file, canonicalName);
   }
 
 public:
@@ -334,10 +384,14 @@ public:
       kj::StringPtr dir = spec.slice(*split + 1);
       auto plugin = spec.slice(0, *split);
 
-      KJ_IF_MAYBE(split2, dir.findFirst(':')) {
-        // Grr, there are two colons. Might this be a Windows path? Let's do some heuristics.
-        if (*split == 1 && (dir.startsWith("/") || dir.startsWith("\\"))) {
-          // So, the first ':' was the second char, and was followed by '/' or '\', e.g.:
+      if (*split == 1 && (dir.startsWith("/") || dir.startsWith("\\"))) {
+        // The colon is the second character and is immediately followed by a slash or backslash.
+        // So, the user passed something like `-o c:/foo`. Is this a request to run the C plugin
+        // and output to `/foo`? Or are we on Windows, and is this a request to run the plugin
+        // `c:/foo`?
+        KJ_IF_MAYBE(split2, dir.findFirst(':')) {
+          // There are two colons. The first ':' was the second char, and was followed by '/' or
+          // '\', e.g.:
           //     capnp compile -o c:/foo.exe:bar
           //
           // In this case we can conclude that the second colon is actually meant to be the
@@ -359,18 +413,24 @@ public:
           //   -> CONTRADICTION
           //
           // We therefore conclude that the *second* colon is in fact the plugin/location separator.
-          //
-          // Note that there is still an ambiguous case:
-          //     capnp compile -o c:/foo
-          //
-          // In this unfortunate case, we have no way to tell if the user meant "use the 'c' plugin
-          // and output to /foo" or "use the plugin c:/foo and output to the default location". We
-          // prefer the former interpretation, because the latter is Windows-specific and such
-          // users can always explicitly specify the output location like:
-          //     capnp compile -o c:/foo:.
 
           dir = dir.slice(*split2 + 1);
           plugin = spec.slice(0, *split2 + 2);
+#if _WIN32
+        } else {
+          // The user wrote something like:
+          //
+          //     capnp compile -o c:/foo/bar
+          //
+          // What does this mean? It depends on what system we're on. On a Unix system, the above
+          // clearly is a request to run the `capnpc-c` plugin (perhaps to output C code) and write
+          // to the directory /foo/bar. But on Windows, absolute paths do not start with '/', and
+          // the above is actually a request to run the plugin `c:/foo/bar`, outputting to the
+          // current directory.
+
+          outputs.add(OutputDirective { spec.asArray(), nullptr });
+          return true;
+#endif
         }
       }
 
@@ -378,7 +438,7 @@ public:
       if (stat(dir.cStr(), &stats) < 0 || !S_ISDIR(stats.st_mode)) {
         return "output location is inaccessible or is not a directory";
       }
-      outputs.add(OutputDirective { plugin, dir });
+      outputs.add(OutputDirective { plugin, disk->getCurrentPath().evalNative(dir) });
     } else {
       outputs.add(OutputDirective { spec.asArray(), nullptr });
     }
@@ -387,22 +447,11 @@ public:
   }
 
   kj::MainBuilder::Validity addSourcePrefix(kj::StringPtr prefix) {
-    // Strip redundant "./" prefixes to make src-prefix matching more lenient.
-    while (prefix.startsWith("./")) {
-      prefix = prefix.slice(2);
-    }
-
-    if (prefix == "" || prefix == ".") {
-      // Irrelevant prefix.
+    if (getSourceDirectory(prefix, true) == nullptr) {
+      return "no such directory";
+    } else {
       return true;
     }
-
-    if (prefix.endsWith("/")) {
-      sourcePrefixes.add(kj::heapString(prefix));
-    } else {
-      sourcePrefixes.add(kj::str(prefix, '/'));
-    }
-    return true;
   }
 
   kj::MainBuilder::Validity generateOutput() {
@@ -432,6 +481,8 @@ public:
     for (size_t i = 0; i < schemas.size(); i++) {
       nodes.setWithCaveats(i, schemas[i].getProto());
     }
+
+    request.adoptSourceInfo(compiler->getAllSourceInfo(message.getOrphanage()));
 
     auto requestedFiles = request.initRequestedFiles(sourceFiles.size());
     for (size_t i = 0; i < sourceFiles.size(); i++) {
@@ -492,17 +543,30 @@ public:
         KJ_SYSCALL(dup2(pipeFds[0], STDIN_FILENO));
         KJ_SYSCALL(close(pipeFds[0]));
 
-        if (output.dir != nullptr) {
-          KJ_SYSCALL(chdir(output.dir.cStr()), output.dir);
+        KJ_IF_MAYBE(d, output.dir) {
+#if _WIN32
+          KJ_SYSCALL(SetCurrentDirectoryW(d->forWin32Api(true).begin()), d->toWin32String(true));
+#else
+          auto wd = d->toString(true);
+          KJ_SYSCALL(chdir(wd.cStr()), wd);
+          KJ_SYSCALL(setenv("PWD", wd.cStr(), true));
+#endif
         }
+
+#if _WIN32
+        // MSVCRT's spawn*() don't correctly escape arguments, which is necessary on Windows
+        // since the underlying system call takes a single command line string rather than
+        // an arg list. We do the escaping ourselves by wrapping the name in quotes. We know
+        // that exeName itself can't contain quotes (since filenames aren't allowed to contain
+        // quotes on Windows), so we don't have to account for those.
+        KJ_ASSERT(exeName.findFirst('\"') == nullptr,
+            "Windows filenames can't contain quotes", exeName);
+        auto escapedExeName = kj::str("\"", exeName, "\"");
+#endif
 
         if (shouldSearchPath) {
 #if _WIN32
-          // MSVCRT's spawn*() don't correctly escape arguments, which is necessary on Windows
-          // since the underlying system call takes a single command line string rather than
-          // an arg list. Instead of trying to do the escaping ourselves, we just pass "plugin"
-          // for argv[0].
-          child = _spawnlp(_P_NOWAIT, exeName.cStr(), "plugin", nullptr);
+          child = _spawnlp(_P_NOWAIT, exeName.cStr(), escapedExeName.cStr(), nullptr);
 #else
           execlp(exeName.cStr(), exeName.cStr(), nullptr);
 #endif
@@ -518,11 +582,7 @@ public:
           }
 
 #if _WIN32
-          // MSVCRT's spawn*() don't correctly escape arguments, which is necessary on Windows
-          // since the underlying system call takes a single command line string rather than
-          // an arg list. Instead of trying to do the escaping ourselves, we just pass "plugin"
-          // for argv[0].
-          child = _spawnl(_P_NOWAIT, exeName.cStr(), "plugin", nullptr);
+          child = _spawnl(_P_NOWAIT, exeName.cStr(), escapedExeName.cStr(), nullptr);
 #else
           execl(exeName.cStr(), exeName.cStr(), nullptr);
 #endif
@@ -585,6 +645,490 @@ public:
   }
 
   // =====================================================================================
+  // "convert" command
+
+private:
+  enum class Format {
+    BINARY,
+    PACKED,
+    FLAT,
+    FLAT_PACKED,
+    CANONICAL,
+    TEXT,
+    JSON
+  };
+
+  kj::Maybe<Format> parseFormatName(kj::StringPtr name) {
+    if (name == "binary"     ) return Format::BINARY;
+    if (name == "packed"     ) return Format::PACKED;
+    if (name == "flat"       ) return Format::FLAT;
+    if (name == "flat-packed") return Format::FLAT_PACKED;
+    if (name == "canonical"  ) return Format::CANONICAL;
+    if (name == "text"       ) return Format::TEXT;
+    if (name == "json"       ) return Format::JSON;
+
+    return nullptr;
+  }
+
+  kj::StringPtr toString(Format format) {
+    switch (format) {
+      case Format::BINARY     : return "binary";
+      case Format::PACKED     : return "packed";
+      case Format::FLAT       : return "flat";
+      case Format::FLAT_PACKED: return "flat-packed";
+      case Format::CANONICAL  : return "canonical";
+      case Format::TEXT       : return "text";
+      case Format::JSON       : return "json";
+    }
+    KJ_UNREACHABLE;
+  }
+
+  Format formatFromDeprecatedFlags(Format defaultFormat) {
+    // For deprecated commands "decode" and "encode".
+    if (flat) {
+      if (packed) {
+        return Format::FLAT_PACKED;
+      } else {
+        return Format::FLAT;
+      }
+    } if (packed) {
+      return Format::PACKED;
+    } else if (binary) {
+      return Format::BINARY;
+    } else {
+      return defaultFormat;
+    }
+  }
+
+  kj::MainBuilder::Validity verifyRequirements(Format format) {
+    if ((format == Format::TEXT || format == Format::JSON) && rootType == StructSchema()) {
+      return kj::str("format requires schema: ", toString(format));
+    } else {
+      return true;
+    }
+  }
+
+public:
+  kj::MainBuilder::Validity setConversion(kj::StringPtr conversion) {
+    KJ_IF_MAYBE(colon, conversion.findFirst(':')) {
+      auto from = kj::str(conversion.slice(0, *colon));
+      auto to = conversion.slice(*colon + 1);
+
+      KJ_IF_MAYBE(f, parseFormatName(from)) {
+        convertFrom = *f;
+      } else {
+        return kj::str("unknown format: ", from);
+      }
+
+      KJ_IF_MAYBE(t, parseFormatName(to)) {
+        convertTo = *t;
+      } else {
+        return kj::str("unknown format: ", to);
+      }
+
+      if (convertFrom == Format::JSON || convertTo == Format::JSON) {
+        // We need annotations to process JSON.
+        // TODO(someday): Find a way that we can process annotations from json.capnp without
+        //   requiring other annotation-only imports like c++.capnp
+        annotationFlag = Compiler::COMPILE_ANNOTATIONS;
+      }
+
+      return true;
+    } else {
+      return "invalid conversion, format is: <from>:<to>";
+    }
+  }
+
+  kj::MainBuilder::Validity convert() {
+    {
+      auto result = verifyRequirements(convertFrom);
+      if (result.getError() != nullptr) return result;
+    }
+    {
+      auto result = verifyRequirements(convertTo);
+      if (result.getError() != nullptr) return result;
+    }
+
+    kj::FdInputStream rawInput(STDIN_FILENO);
+    kj::BufferedInputStreamWrapper input(rawInput);
+
+    kj::FdOutputStream output(STDOUT_FILENO);
+
+    if (!quiet) {
+      auto result = checkPlausibility(convertFrom, input.getReadBuffer());
+      if (result.getError() != nullptr) {
+        return kj::mv(result);
+      }
+    }
+
+    while (input.tryGetReadBuffer().size() > 0) {
+      readOneAndConvert(input, output);
+    }
+
+    context.exit();
+    KJ_CLANG_KNOWS_THIS_IS_UNREACHABLE_BUT_GCC_DOESNT;
+  }
+
+private:
+  kj::Vector<byte> readAll(kj::BufferedInputStreamWrapper& input) {
+    kj::Vector<byte> allBytes;
+    for (;;) {
+      auto buffer = input.tryGetReadBuffer();
+      if (buffer.size() == 0) break;
+      allBytes.addAll(buffer);
+      input.skip(buffer.size());
+    }
+    return allBytes;
+  }
+
+  kj::String readOneText(kj::BufferedInputStreamWrapper& input) {
+    // Consume and return one parentheses-delimited message from the input.
+    //
+    // Accounts for nested parentheses, comments, and string literals.
+
+    enum {
+      NORMAL,
+      COMMENT,
+      QUOTE,
+      QUOTE_ESCAPE,
+      DQUOTE,
+      DQUOTE_ESCAPE
+    } state = NORMAL;
+    uint depth = 0;
+    bool sawClose = false;
+
+    kj::Vector<char> chars;
+
+    for (;;) {
+      auto buffer = input.tryGetReadBuffer();
+
+      if (buffer == nullptr) {
+        // EOF
+        chars.add('\0');
+        return kj::String(chars.releaseAsArray());
+      }
+
+      for (auto i: kj::indices(buffer)) {
+        char c = buffer[i];
+        switch (state) {
+          case NORMAL:
+            switch (c) {
+              case '#': state = COMMENT; break;
+              case '(':
+                if (depth == 0 && sawClose) {
+                  // We already got one complete message. This is the start of the next message.
+                  // Stop here.
+                  chars.addAll(buffer.slice(0, i));
+                  chars.add('\0');
+                  input.skip(i);
+                  return kj::String(chars.releaseAsArray());
+                }
+                ++depth;
+                break;
+              case ')':
+                if (depth > 0) {
+                  if (--depth == 0) {
+                    sawClose = true;
+                  }
+                }
+                break;
+              default: break;
+            }
+            break;
+          case COMMENT:
+            switch (c) {
+              case '\n': state = NORMAL; break;
+              default: break;
+            }
+            break;
+          case QUOTE:
+            switch (c) {
+              case '\'': state = NORMAL; break;
+              case '\\': state = QUOTE_ESCAPE; break;
+              default: break;
+            }
+            break;
+          case QUOTE_ESCAPE:
+            break;
+          case DQUOTE:
+            switch (c) {
+              case '\"': state = NORMAL; break;
+              case '\\': state = DQUOTE_ESCAPE; break;
+              default: break;
+            }
+            break;
+          case DQUOTE_ESCAPE:
+            break;
+        }
+      }
+
+      chars.addAll(buffer);
+      input.skip(buffer.size());
+    }
+  }
+
+  kj::String readOneJson(kj::BufferedInputStreamWrapper& input) {
+    // Consume and return one brace-delimited message from the input.
+    //
+    // Accounts for nested braces, string literals, and comments starting with # or //. Technically
+    // JSON does not permit comments but this code is lenient in case we change things later.
+
+    enum {
+      NORMAL,
+      SLASH,
+      COMMENT,
+      QUOTE,
+      QUOTE_ESCAPE,
+      DQUOTE,
+      DQUOTE_ESCAPE
+    } state = NORMAL;
+    uint depth = 0;
+    bool sawClose = false;
+
+    kj::Vector<char> chars;
+
+    for (;;) {
+      auto buffer = input.tryGetReadBuffer();
+
+      if (buffer == nullptr) {
+        // EOF
+        chars.add('\0');
+        return kj::String(chars.releaseAsArray());
+      }
+
+      for (auto i: kj::indices(buffer)) {
+        char c = buffer[i];
+        switch (state) {
+          case SLASH:
+            if (c == '/') {
+              state = COMMENT;
+              break;
+            }
+            KJ_FALLTHROUGH;
+          case NORMAL:
+            switch (c) {
+              case '#': state = COMMENT; break;
+              case '/': state = SLASH; break;
+              case '{':
+                if (depth == 0 && sawClose) {
+                  // We already got one complete message. This is the start of the next message.
+                  // Stop here.
+                  chars.addAll(buffer.slice(0, i));
+                  chars.add('\0');
+                  input.skip(i);
+                  return kj::String(chars.releaseAsArray());
+                }
+                ++depth;
+                break;
+              case '}':
+                if (depth > 0) {
+                  if (--depth == 0) {
+                    sawClose = true;
+                  }
+                }
+                break;
+              default: break;
+            }
+            break;
+          case COMMENT:
+            switch (c) {
+              case '\n': state = NORMAL; break;
+              default: break;
+            }
+            break;
+          case QUOTE:
+            switch (c) {
+              case '\'': state = NORMAL; break;
+              case '\\': state = QUOTE_ESCAPE; break;
+              default: break;
+            }
+            break;
+          case QUOTE_ESCAPE:
+            break;
+          case DQUOTE:
+            switch (c) {
+              case '\"': state = NORMAL; break;
+              case '\\': state = DQUOTE_ESCAPE; break;
+              default: break;
+            }
+            break;
+          case DQUOTE_ESCAPE:
+            break;
+        }
+      }
+
+      chars.addAll(buffer);
+      input.skip(buffer.size());
+    }
+  }
+
+  class ParseErrorCatcher: public kj::ExceptionCallback {
+  public:
+    ParseErrorCatcher(kj::ProcessContext& context): context(context) {}
+    ~ParseErrorCatcher() noexcept(false) {
+      if (!unwindDetector.isUnwinding()) {
+        KJ_IF_MAYBE(e, exception) {
+          context.error(kj::str(
+              "*** ERROR CONVERTING PREVIOUS MESSAGE ***\n"
+              "The following error occurred while converting the message above.\n"
+              "This probably means the input data is invalid/corrupted.\n",
+              "Exception description: ", e->getDescription(), "\n"
+              "Code location: ", e->getFile(), ":", e->getLine(), "\n"
+              "*** END ERROR ***"));
+        }
+      }
+    }
+
+    void onRecoverableException(kj::Exception&& e) {
+      // Only capture the first exception, on the assumption that later exceptions are probably
+      // just cascading problems.
+      if (exception == nullptr) {
+        exception = kj::mv(e);
+      }
+    }
+
+  private:
+    kj::ProcessContext& context;
+    kj::Maybe<kj::Exception> exception;
+    kj::UnwindDetector unwindDetector;
+  };
+
+  void readOneAndConvert(kj::BufferedInputStreamWrapper& input, kj::OutputStream& output) {
+    // Since this is a debug tool, lift the usual security limits.  Worse case is the process
+    // crashes or has to be killed.
+    ReaderOptions options;
+    options.nestingLimit = kj::maxValue;
+    options.traversalLimitInWords = kj::maxValue;
+
+    ParseErrorCatcher parseErrorCatcher(context);
+
+    switch (convertFrom) {
+      case Format::BINARY: {
+        capnp::InputStreamMessageReader message(input, options);
+        return writeConversion(message.getRoot<AnyStruct>(), output);
+      }
+      case Format::PACKED: {
+        capnp::PackedMessageReader message(input, options);
+        return writeConversion(message.getRoot<AnyStruct>(), output);
+      }
+      case Format::FLAT:
+      case Format::CANONICAL: {
+        auto allBytes = readAll(input);
+
+        // Technically we don't know if the bytes are aligned so we'd better copy them to a new
+        // array. Note that if we have a non-whole number of words we chop off the straggler
+        // bytes. This is fine because if those bytes are actually part of the message we will
+        // hit an error later and if they are not then who cares?
+        auto words = kj::heapArray<word>(allBytes.size() / sizeof(word));
+        memcpy(words.begin(), allBytes.begin(), words.size() * sizeof(word));
+
+        kj::ArrayPtr<const word> segments[1] = { words };
+        SegmentArrayMessageReader message(segments, options);
+        if (convertFrom == Format::CANONICAL) {
+          KJ_REQUIRE(message.isCanonical());
+        }
+        return writeConversion(message.getRoot<AnyStruct>(), output);
+      }
+      case Format::FLAT_PACKED: {
+        auto allBytes = readAll(input);
+
+        auto words = kj::heapArray<word>(computeUnpackedSizeInWords(allBytes));
+        kj::ArrayInputStream input(allBytes);
+        capnp::_::PackedInputStream unpacker(input);
+        unpacker.read(words.asBytes().begin(), words.asBytes().size());
+        word dummy;
+        KJ_ASSERT(unpacker.tryRead(&dummy, sizeof(dummy), sizeof(dummy)) == 0);
+
+        kj::ArrayPtr<const word> segments[1] = { words };
+        SegmentArrayMessageReader message(segments, options);
+        return writeConversion(message.getRoot<AnyStruct>(), output);
+      }
+      case Format::TEXT: {
+        auto text = readOneText(input);
+        MallocMessageBuilder message;
+        TextCodec codec;
+        codec.setPrettyPrint(pretty);
+        auto root = message.initRoot<DynamicStruct>(rootType);
+        codec.decode(text, root);
+        return writeConversion(root.asReader(), output);
+      }
+      case Format::JSON: {
+        auto text = readOneJson(input);
+        MallocMessageBuilder message;
+        JsonCodec codec;
+        codec.setPrettyPrint(pretty);
+        codec.handleByAnnotation(rootType);
+        auto root = message.initRoot<DynamicStruct>(rootType);
+        codec.decode(text, root);
+        return writeConversion(root.asReader(), output);
+      }
+    }
+
+    KJ_UNREACHABLE;
+  }
+
+  void writeConversion(AnyStruct::Reader reader, kj::OutputStream& output) {
+    switch (convertTo) {
+      case Format::BINARY: {
+        MallocMessageBuilder message(
+            segmentSize == 0 ? SUGGESTED_FIRST_SEGMENT_WORDS : segmentSize,
+            segmentSize == 0 ? SUGGESTED_ALLOCATION_STRATEGY : AllocationStrategy::FIXED_SIZE);
+        message.setRoot(reader);
+        capnp::writeMessage(output, message);
+        return;
+      }
+      case Format::PACKED: {
+        MallocMessageBuilder message(
+            segmentSize == 0 ? SUGGESTED_FIRST_SEGMENT_WORDS : segmentSize,
+            segmentSize == 0 ? SUGGESTED_ALLOCATION_STRATEGY : AllocationStrategy::FIXED_SIZE);
+        message.setRoot(reader);
+        capnp::writePackedMessage(output, message);
+        return;
+      }
+      case Format::FLAT: {
+        auto words = kj::heapArray<word>(reader.totalSize().wordCount + 1);
+        memset(words.begin(), 0, words.asBytes().size());
+        copyToUnchecked(reader, words);
+        output.write(words.begin(), words.asBytes().size());
+        return;
+      }
+      case Format::FLAT_PACKED: {
+        auto words = kj::heapArray<word>(reader.totalSize().wordCount + 1);
+        memset(words.begin(), 0, words.asBytes().size());
+        copyToUnchecked(reader, words);
+        kj::BufferedOutputStreamWrapper buffered(output);
+        capnp::_::PackedOutputStream packed(buffered);
+        packed.write(words.begin(), words.asBytes().size());
+        return;
+      }
+      case Format::CANONICAL: {
+        auto words = reader.canonicalize();
+        output.write(words.begin(), words.asBytes().size());
+        return;
+      }
+      case Format::TEXT: {
+        TextCodec codec;
+        codec.setPrettyPrint(pretty);
+        auto text = codec.encode(reader.as<DynamicStruct>(rootType));
+        output.write({text.asBytes(), kj::StringPtr("\n").asBytes()});
+        return;
+      }
+      case Format::JSON: {
+        JsonCodec codec;
+        codec.setPrettyPrint(pretty);
+        codec.handleByAnnotation(rootType);
+        auto text = codec.encode(reader.as<DynamicStruct>(rootType));
+        output.write({text.asBytes(), kj::StringPtr("\n").asBytes()});
+        return;
+      }
+    }
+
+    KJ_UNREACHABLE;
+  }
+
+public:
+
+  // =====================================================================================
   // "decode" command
 
   kj::MainBuilder::Validity codeBinary() {
@@ -621,150 +1165,95 @@ public:
     return true;
   }
 
-  kj::MainBuilder::Validity setRootType(kj::StringPtr type) {
+  kj::MainBuilder::Validity setRootType(kj::StringPtr input) {
     KJ_ASSERT(sourceFiles.size() == 1);
 
-    KJ_IF_MAYBE(schema, resolveName(sourceFiles[0].id, type)) {
-      if (schema->getProto().which() != schema::Node::STRUCT) {
-        return "not a struct type";
+    class CliArgumentErrorReporter: public ErrorReporter {
+    public:
+      void addError(uint32_t startByte, uint32_t endByte, kj::StringPtr message) override {
+        if (startByte < endByte) {
+          error = kj::str(startByte + 1, "-", endByte, ": ", message);
+        } else if (startByte > 0) {
+          error = kj::str(startByte + 1, ": ", message);
+        } else {
+          error = kj::str(message);
+        }
       }
-      rootType = schema->asStruct();
-      return true;
+
+      bool hadErrors() override {
+        return error != nullptr;
+      }
+
+      kj::MainBuilder::Validity getValidity() {
+        KJ_IF_MAYBE(e, error) {
+          return kj::mv(*e);
+        } else {
+          return true;
+        }
+      }
+
+    private:
+      kj::Maybe<kj::String> error;
+    };
+
+    CliArgumentErrorReporter errorReporter;
+
+    capnp::MallocMessageBuilder tokenArena;
+    auto lexedTokens = tokenArena.initRoot<capnp::compiler::LexedTokens>();
+    lex(input, lexedTokens, errorReporter);
+
+    CapnpParser parser(tokenArena.getOrphanage(), errorReporter);
+    auto tokens = lexedTokens.asReader().getTokens();
+    CapnpParser::ParserInput parserInput(tokens.begin(), tokens.end());
+
+    bool success = false;
+
+    if (parserInput.getPosition() == tokens.end()) {
+      // Empty argument?
+      errorReporter.addError(0, 0, "Couldn't parse type name.");
     } else {
-      return "no such type";
+      KJ_IF_MAYBE(expression, parser.getParsers().expression(parserInput)) {
+        // The input is expected to contain a *single* expression.
+        if (parserInput.getPosition() == tokens.end()) {
+          // Hooray, now parse it.
+          KJ_IF_MAYBE(compiledType,
+              sourceFiles[0].compiled.evalType(expression->getReader(), errorReporter)) {
+            KJ_IF_MAYBE(type, compiledType->getSchema()) {
+              if (type->isStruct()) {
+                rootType = type->asStruct();
+                success = true;
+              } else {
+                errorReporter.addError(0, 0, "Type is not a struct.");
+              }
+            } else {
+              // Apparently named a file scope.
+              errorReporter.addError(0, 0, "Type is not a struct.");
+            }
+          }
+        } else {
+          errorReporter.addErrorOn(parserInput.current(), "Couldn't parse type name.");
+        }
+      } else {
+        auto best = parserInput.getBest();
+        if (best == tokens.end()) {
+          errorReporter.addError(input.size(), input.size(), "Couldn't parse type name.");
+        } else {
+          errorReporter.addErrorOn(*best, "Couldn't parse type name.");
+        }
+      }
     }
+
+    KJ_ASSERT(success || errorReporter.hadErrors());
+    return errorReporter.getValidity();
   }
 
-private:
-  kj::Maybe<Schema> resolveName(uint64_t scopeId, kj::StringPtr name) {
-    while (name.size() > 0) {
-      kj::String temp;
-      kj::StringPtr part;
-      KJ_IF_MAYBE(dotpos, name.findFirst('.')) {
-        temp = kj::heapString(name.slice(0, *dotpos));
-        part = temp;
-        name = name.slice(*dotpos + 1);
-      } else {
-        part = name;
-        name = nullptr;
-      }
-
-      KJ_IF_MAYBE(childId, compiler->lookup(scopeId, part)) {
-        scopeId = *childId;
-      } else {
-        return nullptr;
-      }
-    }
-    return compiler->getLoader().get(scopeId);
-  }
-
-public:
   kj::MainBuilder::Validity decode() {
-    kj::FdInputStream rawInput(STDIN_FILENO);
-    kj::BufferedInputStreamWrapper input(rawInput);
-
-    if (!quiet) {
-      auto result = checkPlausibility(input.getReadBuffer());
-      if (result.getError() != nullptr) {
-        return kj::mv(result);
-      }
-    }
-
-    if (flat) {
-      // Read in the whole input to decode as one segment.
-      kj::Array<word> words;
-
-      {
-        kj::Vector<byte> allBytes;
-        for (;;) {
-          auto buffer = input.tryGetReadBuffer();
-          if (buffer.size() == 0) break;
-          allBytes.addAll(buffer);
-          input.skip(buffer.size());
-        }
-
-        if (packed) {
-          words = kj::heapArray<word>(computeUnpackedSizeInWords(allBytes));
-          kj::ArrayInputStream input(allBytes);
-          capnp::_::PackedInputStream unpacker(input);
-          unpacker.read(words.asBytes().begin(), words.asBytes().size());
-          word dummy;
-          KJ_ASSERT(unpacker.tryRead(&dummy, sizeof(dummy), sizeof(dummy)) == 0);
-        } else {
-          // Technically we don't know if the bytes are aligned so we'd better copy them to a new
-          // array. Note that if we have a non-whole number of words we chop off the straggler
-          // bytes. This is fine because if those bytes are actually part of the message we will
-          // hit an error later and if they are not then who cares?
-          words = kj::heapArray<word>(allBytes.size() / sizeof(word));
-          memcpy(words.begin(), allBytes.begin(), words.size() * sizeof(word));
-        }
-      }
-
-      kj::ArrayPtr<const word> segments = words;
-      decodeInner<SegmentArrayMessageReader>(arrayPtr(&segments, 1));
-    } else {
-      while (input.tryGetReadBuffer().size() > 0) {
-        if (packed) {
-          decodeInner<PackedMessageReader>(input);
-        } else {
-          decodeInner<InputStreamMessageReader>(input);
-        }
-      }
-    }
-
-    context.exit();
-    KJ_CLANG_KNOWS_THIS_IS_UNREACHABLE_BUT_GCC_DOESNT;
+    convertTo = Format::TEXT;
+    convertFrom = formatFromDeprecatedFlags(Format::BINARY);
+    return convert();
   }
 
 private:
-  struct ParseErrorCatcher: public kj::ExceptionCallback {
-    void onRecoverableException(kj::Exception&& e) {
-      // Only capture the first exception, on the assumption that later exceptions are probably
-      // just cascading problems.
-      if (exception == nullptr) {
-        exception = kj::mv(e);
-      }
-    }
-
-    kj::Maybe<kj::Exception> exception;
-  };
-
-  template <typename MessageReaderType, typename Input>
-  void decodeInner(Input&& input) {
-    // Since this is a debug tool, lift the usual security limits.  Worse case is the process
-    // crashes or has to be killed.
-    ReaderOptions options;
-    options.nestingLimit = kj::maxValue;
-    options.traversalLimitInWords = kj::maxValue;
-
-    MessageReaderType reader(input, options);
-    kj::String text;
-    kj::Maybe<kj::Exception> exception;
-
-    {
-      ParseErrorCatcher catcher;
-      auto root = reader.template getRoot<DynamicStruct>(rootType);
-      if (pretty) {
-        text = kj::str(prettyPrint(root), '\n');
-      } else {
-        text = kj::str(root, '\n');
-      }
-      exception = kj::mv(catcher.exception);
-    }
-
-    kj::FdOutputStream(STDOUT_FILENO).write(text.begin(), text.size());
-
-    KJ_IF_MAYBE(e, exception) {
-      context.error(kj::str(
-          "*** ERROR DECODING PREVIOUS MESSAGE ***\n"
-          "The following error occurred while decoding the message above.\n"
-          "This probably means the input data is invalid/corrupted.\n",
-          "Exception description: ", e->getDescription(), "\n"
-          "Code location: ", e->getFile(), ":", e->getLine(), "\n"
-          "*** END ERROR ***"));
-    }
-  }
-
   enum Plausibility {
     IMPOSSIBLE,
     IMPLAUSIBLE,
@@ -798,8 +1287,13 @@ private:
       return IMPOSSIBLE;
     }
     if ((prefix[3] & 0x80) != 0) {
-      // Offset is negative (invalid).
-      return IMPOSSIBLE;
+      if (prefix[0] == 0xff && prefix[1] == 0xff && prefix[2] == 0xff && prefix[3] == 0xff &&
+          prefix[4] == 0    && prefix[5] == 0    && prefix[6] == 0    && prefix[7] == 0) {
+        // This is an empty struct with offset of -1. That's valid.
+      } else {
+        // Offset is negative (invalid).
+        return IMPOSSIBLE;
+      }
     }
     if ((prefix[3] & 0xe0) != 0) {
       // Offset is over a gigabyte (implausible).
@@ -933,359 +1427,228 @@ private:
     });
   }
 
-  kj::MainBuilder::Validity checkPlausibility(kj::ArrayPtr<const byte> prefix) {
-    if (flat && packed) {
-      switch (isPlausiblyPackedFlat(prefix)) {
-        case PLAUSIBLE:
-          break;
-        case IMPOSSIBLE:
-          if (plausibleOrWrongType(isPlausiblyPacked(prefix))) {
-            return "The input is not in --packed --flat format.  It looks like it is in --packed "
-                   "format.  Try removing --flat.";
-          } else if (plausibleOrWrongType(isPlausiblyFlat(prefix))) {
-            return "The input is not in --packed --flat format.  It looks like it is in --flat "
-                   "format.  Try removing --packed.";
-          } else if (plausibleOrWrongType(isPlausiblyBinary(prefix))) {
-            return "The input is not in --packed --flat format.  It looks like it is in regular "
-                   "binary format.  Try removing the --packed and --flat flags.";
-          } else {
-            return "The input is not a Cap'n Proto message.";
-          }
-        case IMPLAUSIBLE:
-          if (plausibleOrWrongType(isPlausiblyPacked(prefix))) {
-            context.warning(
-                "*** WARNING ***\n"
-                "The input data does not appear to be in --packed --flat format.  It looks like\n"
-                "it may be in --packed format.  I'll try to parse it in --packed --flat format\n"
-                "as you requested, but if it doesn't work, try removing --flat.  Use --quiet to\n"
-                "suppress this warning.\n"
-                "*** END WARNING ***\n");
-          } else if (plausibleOrWrongType(isPlausiblyFlat(prefix))) {
-            context.warning(
-                "*** WARNING ***\n"
-                "The input data does not appear to be in --packed --flat format.  It looks like\n"
-                "it may be in --flat format.  I'll try to parse it in --packed --flat format as\n"
-                "you requested, but if it doesn't work, try removing --packed.  Use --quiet to\n"
-                "suppress this warning.\n"
-                "*** END WARNING ***\n");
-          } else if (plausibleOrWrongType(isPlausiblyBinary(prefix))) {
-            context.warning(
-                "*** WARNING ***\n"
-                "The input data does not appear to be in --packed --flat format.  It looks like\n"
-                "it may be in regular binary format.  I'll try to parse it in --packed --flat\n"
-                "format as you requested, but if it doesn't work, try removing --packed and\n"
-                "--flat.  Use --quiet to suppress this warning.\n"
-                "*** END WARNING ***\n");
-          } else {
-            context.warning(
-                "*** WARNING ***\n"
-                "The input data does not appear to be a Cap'n Proto message in any known\n"
-                "binary format.  I'll try to parse it anyway, but if it doesn't work, please\n"
-                "check your input.  Use --quiet to suppress this warning.\n"
-                "*** END WARNING ***\n");
+  Plausibility isPlausiblyText(kj::ArrayPtr<const byte> prefix) {
+    enum { PREAMBLE, COMMENT, BODY } state = PREAMBLE;
+
+    for (char c: prefix.asChars()) {
+      switch (state) {
+        case PREAMBLE:
+          // Before opening parenthesis.
+          switch (c) {
+            case '(': state = BODY; continue;
+            case '#': state = COMMENT; continue;
+            case ' ':
+            case '\n':
+            case '\r':
+            case '\t':
+            case '\v':
+              // whitespace
+              break;
+            default:
+              // Not whitespace, not comment, not open parenthesis. Impossible!
+              return IMPOSSIBLE;
           }
           break;
-        case WRONG_TYPE:
-          if (plausibleOrWrongType(isPlausiblyPacked(prefix))) {
-            context.warning(
-                "*** WARNING ***\n"
-                "The input data does not appear to be the type that you specified.  I'll try\n"
-                "to parse it anyway, but if it doesn't look right, please verify that you\n"
-                "have the right type.  This could also be because the input is not in --flat\n"
-                "format; indeed, it looks like this input may be in regular --packed format,\n"
-                "so you might want to try removing --flat.  Use --quiet to suppress this\n"
-                "warning.\n"
-                "*** END WARNING ***\n");
-          } else {
-            context.warning(
-                "*** WARNING ***\n"
-                "The input data does not appear to be the type that you specified.  I'll try\n"
-                "to parse it anyway, but if it doesn't look right, please verify that you\n"
-                "have the right type.  Use --quiet to suppress this warning.\n"
-                "*** END WARNING ***\n");
+        case COMMENT:
+          switch (c) {
+            case '\n': state = PREAMBLE; continue;
+            default: break;
+          }
+          break;
+        case BODY:
+          switch (c) {
+            case '\"':
+            case '\'':
+              // String literal. Let's stop here before things get complicated.
+              return PLAUSIBLE;
+            default:
+              break;
           }
           break;
       }
-    } else if (flat) {
-      switch (isPlausiblyFlat(prefix)) {
-        case PLAUSIBLE:
-          break;
-        case IMPOSSIBLE:
-          if (plausibleOrWrongType(isPlausiblyPacked(prefix))) {
-            return "The input is not in --flat format.  It looks like it is in --packed format.  "
-                   "Try that instead.";
-          } else if (plausibleOrWrongType(isPlausiblyPackedFlat(prefix))) {
-            return "The input is not in --flat format.  It looks like it is in --packed --flat "
-                   "format.  Try adding --packed.";
-          } else if (plausibleOrWrongType(isPlausiblyBinary(prefix))) {
-            return "The input is not in --flat format.  It looks like it is in regular binary "
-                   "format.  Try removing the --flat flag.";
-          } else {
-            return "The input is not a Cap'n Proto message.";
-          }
-        case IMPLAUSIBLE:
-          if (plausibleOrWrongType(isPlausiblyPacked(prefix))) {
-            context.warning(
-                "*** WARNING ***\n"
-                "The input data does not appear to be in --flat format.  It looks like it may\n"
-                "be in --packed format.  I'll try to parse it in --flat format as you\n"
-                "requested, but if it doesn't work, try --packed instead.  Use --quiet to\n"
-                "suppress this warning.\n"
-                "*** END WARNING ***\n");
-          } else if (plausibleOrWrongType(isPlausiblyPackedFlat(prefix))) {
-            context.warning(
-                "*** WARNING ***\n"
-                "The input data does not appear to be in --flat format.  It looks like it may\n"
-                "be in --packed --flat format.  I'll try to parse it in --flat format as you\n"
-                "requested, but if it doesn't work, try adding --packed.  Use --quiet to\n"
-                "suppress this warning.\n"
-                "*** END WARNING ***\n");
-          } else if (plausibleOrWrongType(isPlausiblyBinary(prefix))) {
-            context.warning(
-                "*** WARNING ***\n"
-                "The input data does not appear to be in --flat format.  It looks like it may\n"
-                "be in regular binary format.  I'll try to parse it in --flat format as you\n"
-                "requested, but if it doesn't work, try removing --flat.  Use --quiet to\n"
-                "suppress this warning.\n"
-                "*** END WARNING ***\n");
-          } else {
-            context.warning(
-                "*** WARNING ***\n"
-                "The input data does not appear to be a Cap'n Proto message in any known\n"
-                "binary format.  I'll try to parse it anyway, but if it doesn't work, please\n"
-                "check your input.  Use --quiet to suppress this warning.\n"
-                "*** END WARNING ***\n");
-          }
-          break;
-        case WRONG_TYPE:
-          if (plausibleOrWrongType(isPlausiblyBinary(prefix))) {
-            context.warning(
-                "*** WARNING ***\n"
-                "The input data does not appear to be the type that you specified.  I'll try\n"
-                "to parse it anyway, but if it doesn't look right, please verify that you\n"
-                "have the right type.  This could also be because the input is not in --flat\n"
-                "format; indeed, it looks like this input may be in regular binary format,\n"
-                "so you might want to try removing --flat.  Use --quiet to suppress this\n"
-                "warning.\n"
-                "*** END WARNING ***\n");
-          } else {
-            context.warning(
-                "*** WARNING ***\n"
-                "The input data does not appear to be the type that you specified.  I'll try\n"
-                "to parse it anyway, but if it doesn't look right, please verify that you\n"
-                "have the right type.  Use --quiet to suppress this warning.\n"
-                "*** END WARNING ***\n");
-          }
-          break;
-      }
-    } else if (packed) {
-      switch (isPlausiblyPacked(prefix)) {
-        case PLAUSIBLE:
-          break;
-        case IMPOSSIBLE:
-          if (plausibleOrWrongType(isPlausiblyBinary(prefix))) {
-            return "The input is not in --packed format.  It looks like it is in regular binary "
-                   "format.  Try removing the --packed flag.";
-          } else if (plausibleOrWrongType(isPlausiblyPackedFlat(prefix))) {
-            return "The input is not in --packed format, nor does it look like it is in regular "
-                   "binary format.  It looks like it could be in --packed --flat format, although "
-                   "that is unusual so I could be wrong.";
-          } else if (plausibleOrWrongType(isPlausiblyFlat(prefix))) {
-            return "The input is not in --packed format, nor does it look like it is in regular "
-                   "binary format.  It looks like it could be in --flat format, although that "
-                   "is unusual so I could be wrong.";
-          } else {
-            return "The input is not a Cap'n Proto message.";
-          }
-        case IMPLAUSIBLE:
-          if (plausibleOrWrongType(isPlausiblyPackedFlat(prefix))) {
-            context.warning(
-                "*** WARNING ***\n"
-                "The input data does not appear to be in --packed format.  It looks like it may\n"
-                "be in --packed --flat format.  I'll try to parse it in --packed format as you\n"
-                "requested, but if it doesn't work, try adding --flat.  Use --quiet to\n"
-                "suppress this warning.\n"
-                "*** END WARNING ***\n");
-          } else if (plausibleOrWrongType(isPlausiblyBinary(prefix))) {
-            context.warning(
-                "*** WARNING ***\n"
-                "The input data does not appear to be in --packed format.  It looks like it\n"
-                "may be in regular binary format.  I'll try to parse it in --packed format as\n"
-                "you requested, but if it doesn't work, try removing --packed.  Use --quiet to\n"
-                "suppress this warning.\n"
-                "*** END WARNING ***\n");
-          } else if (plausibleOrWrongType(isPlausiblyFlat(prefix))) {
-            context.warning(
-                "*** WARNING ***\n"
-                "The input data does not appear to be in --packed format, nor does it look\n"
-                "like it's in regular binary format.  It looks like it could be in --flat\n"
-                "format, although that is unusual so I could be wrong.  I'll try to parse\n"
-                "it in --flat format as you requested, but if it doesn't work, you might\n"
-                "want to try --flat, or the data may not be Cap'n Proto at all.  Use\n"
-                "--quiet to suppress this warning.\n"
-                "*** END WARNING ***\n");
-          } else {
-            context.warning(
-                "*** WARNING ***\n"
-                "The input data does not appear to be a Cap'n Proto message in any known\n"
-                "binary format.  I'll try to parse it anyway, but if it doesn't work, please\n"
-                "check your input.  Use --quiet to suppress this warning.\n"
-                "*** END WARNING ***\n");
-          }
-          break;
-        case WRONG_TYPE:
-          context.warning(
-              "*** WARNING ***\n"
-              "The input data does not appear to be the type that you specified.  I'll try\n"
-              "to parse it anyway, but if it doesn't look right, please verify that you\n"
-              "have the right type.  Use --quiet to suppress this warning.\n"
-              "*** END WARNING ***\n");
-          break;
-      }
-    } else {
-      switch (isPlausiblyBinary(prefix)) {
-        case PLAUSIBLE:
-          break;
-        case IMPOSSIBLE:
-          if (plausibleOrWrongType(isPlausiblyPacked(prefix))) {
-            return "The input is not in regular binary format.  It looks like it is in --packed "
-                   "format.  Try adding the --packed flag.";
-          } else if (plausibleOrWrongType(isPlausiblyFlat(prefix))) {
-            return "The input is not in regular binary format, nor does it look like it is in "
-                   "--packed format.  It looks like it could be in --flat format, although that "
-                   "is unusual so I could be wrong.";
-          } else if (plausibleOrWrongType(isPlausiblyPackedFlat(prefix))) {
-            return "The input is not in regular binary format, nor does it look like it is in "
-                   "--packed format.  It looks like it could be in --packed --flat format, "
-                   "although that is unusual so I could be wrong.";
-          } else {
-            return "The input is not a Cap'n Proto message.";
-          }
-        case IMPLAUSIBLE:
-          if (plausibleOrWrongType(isPlausiblyPacked(prefix))) {
-            context.warning(
-                "*** WARNING ***\n"
-                "The input data does not appear to be in regular binary format.  It looks like\n"
-                "it may be in --packed format.  I'll try to parse it in regular format as you\n"
-                "requested, but if it doesn't work, try adding --packed.  Use --quiet to\n"
-                "suppress this warning.\n"
-                "*** END WARNING ***\n");
-          } else if (plausibleOrWrongType(isPlausiblyPacked(prefix))) {
-            context.warning(
-                "*** WARNING ***\n"
-                "The input data does not appear to be in regular binary format.  It looks like\n"
-                "it may be in --packed --flat format.  I'll try to parse it in regular format as\n"
-                "you requested, but if it doesn't work, try adding --packed --flat.  Use --quiet\n"
-                "to suppress this warning.\n"
-                "*** END WARNING ***\n");
-          } else if (plausibleOrWrongType(isPlausiblyFlat(prefix))) {
-            context.warning(
-                "*** WARNING ***\n"
-                "The input data does not appear to be in regular binary format, nor does it\n"
-                "look like it's in --packed format.  It looks like it could be in --flat\n"
-                "format, although that is unusual so I could be wrong.  I'll try to parse\n"
-                "it in regular format as you requested, but if it doesn't work, you might\n"
-                "want to try --flat, or the data may not be Cap'n Proto at all.  Use\n"
-                "--quiet to suppress this warning.\n"
-                "*** END WARNING ***\n");
-          } else {
-            context.warning(
-                "*** WARNING ***\n"
-                "The input data does not appear to be a Cap'n Proto message in any known\n"
-                "binary format.  I'll try to parse it anyway, but if it doesn't work, please\n"
-                "check your input.  Use --quiet to suppress this warning.\n"
-                "*** END WARNING ***\n");
-          }
-          break;
-        case WRONG_TYPE:
-          context.warning(
-              "*** WARNING ***\n"
-              "The input data does not appear to be the type that you specified.  I'll try\n"
-              "to parse it anyway, but if it doesn't look right, please verify that you\n"
-              "have the right type.  Use --quiet to suppress this warning.\n"
-              "*** END WARNING ***\n");
-          break;
+
+      if ((static_cast<uint8_t>(c) < 0x20 && c != '\n' && c != '\r' && c != '\t' && c != '\v')
+          || c == 0x7f) {
+        // Unprintable character.
+        return IMPOSSIBLE;
       }
     }
 
-    return true;
+    return PLAUSIBLE;
+  }
+
+  Plausibility isPlausiblyJson(kj::ArrayPtr<const byte> prefix) {
+    enum { PREAMBLE, COMMENT, BODY } state = PREAMBLE;
+
+    for (char c: prefix.asChars()) {
+      switch (state) {
+        case PREAMBLE:
+          // Before opening parenthesis.
+          switch (c) {
+            case '{': state = BODY; continue;
+            case '#': state = COMMENT; continue;
+            case '/': state = COMMENT; continue;
+            case ' ':
+            case '\n':
+            case '\r':
+            case '\t':
+            case '\v':
+              // whitespace
+              break;
+            default:
+              // Not whitespace, not comment, not open brace. Impossible!
+              return IMPOSSIBLE;
+          }
+          break;
+        case COMMENT:
+          switch (c) {
+            case '\n': state = PREAMBLE; continue;
+            default: break;
+          }
+          break;
+        case BODY:
+          switch (c) {
+            case '\"':
+              // String literal. Let's stop here before things get complicated.
+              return PLAUSIBLE;
+            default:
+              break;
+          }
+          break;
+      }
+
+      if ((c > 0 && c < ' ' && c != '\n' && c != '\r' && c != '\t' && c != '\v') || c == 0x7f) {
+        // Unprintable character.
+        return IMPOSSIBLE;
+      }
+    }
+
+    return PLAUSIBLE;
+  }
+
+  Plausibility isPlausibly(Format format, kj::ArrayPtr<const byte> prefix) {
+    switch (format) {
+      case Format::BINARY     : return isPlausiblyBinary    (prefix);
+      case Format::PACKED     : return isPlausiblyPacked    (prefix);
+      case Format::FLAT       : return isPlausiblyFlat      (prefix);
+      case Format::FLAT_PACKED: return isPlausiblyPackedFlat(prefix);
+      case Format::CANONICAL  : return isPlausiblyFlat      (prefix);
+      case Format::TEXT       : return isPlausiblyText      (prefix);
+      case Format::JSON       : return isPlausiblyJson      (prefix);
+    }
+    KJ_UNREACHABLE;
+  }
+
+  kj::Maybe<Format> guessFormat(kj::ArrayPtr<const byte> prefix) {
+    Format candidates[] = {
+      Format::BINARY,
+      Format::TEXT,
+      Format::PACKED,
+      Format::JSON,
+      Format::FLAT,
+      Format::FLAT_PACKED
+    };
+
+    for (Format candidate: candidates) {
+      if (plausibleOrWrongType(isPlausibly(candidate, prefix))) {
+        return candidate;
+      }
+    }
+
+    return nullptr;
+  }
+
+  kj::MainBuilder::Validity checkPlausibility(Format format, kj::ArrayPtr<const byte> prefix) {
+    switch (isPlausibly(format, prefix)) {
+      case PLAUSIBLE:
+        return true;
+
+      case IMPOSSIBLE:
+        KJ_IF_MAYBE(guess, guessFormat(prefix)) {
+          return kj::str(
+             "The input is not in \"", toString(format), "\" format. It looks like it is in \"",
+             toString(*guess), "\" format. Try that instead.");
+        } else {
+          return kj::str(
+             "The input is not in \"", toString(format), "\" format.");
+        }
+
+      case IMPLAUSIBLE:
+        KJ_IF_MAYBE(guess, guessFormat(prefix)) {
+          context.warning(kj::str(
+              "*** WARNING ***\n"
+              "The input data does not appear to be in \"", toString(format), "\" format. It\n"
+              "looks like it may be in \"", toString(*guess), "\" format. I'll try to parse\n"
+              "it in \"", toString(format), "\" format as you requested, but if it doesn't work,\n"
+              "try \"", toString(format), "\" instead. Use --quiet to suppress this warning.\n"
+              "*** END WARNING ***\n"));
+        } else {
+          context.warning(kj::str(
+              "*** WARNING ***\n"
+              "The input data does not appear to be in \"", toString(format), "\" format, nor\n"
+              "in any other known format. I'll try to parse it in \"", toString(format), "\"\n"
+              "format anyway, as you requested. Use --quiet to suppress this warning.\n"
+              "*** END WARNING ***\n"));
+        }
+        return true;
+
+      case WRONG_TYPE:
+        if (format == Format::FLAT && plausibleOrWrongType(isPlausiblyBinary(prefix))) {
+          context.warning(
+              "*** WARNING ***\n"
+              "The input data does not appear to match the schema that you specified. I'll try\n"
+              "to parse it anyway, but if it doesn't look right, please verify that you\n"
+              "have the right schema. This could also be because the input is not in \"flat\"\n"
+              "format; indeed, it looks like this input may be in regular binary format,\n"
+              "so you might want to try \"binary\" instead.  Use --quiet to suppress this\n"
+              "warning.\n"
+              "*** END WARNING ***\n");
+        } else if (format == Format::FLAT_PACKED &&
+                   plausibleOrWrongType(isPlausiblyPacked(prefix))) {
+          context.warning(
+              "*** WARNING ***\n"
+              "The input data does not appear to match the schema that you specified. I'll try\n"
+              "to parse it anyway, but if it doesn't look right, please verify that you\n"
+              "have the right schema. This could also be because the input is not in \"flat-packed\"\n"
+              "format; indeed, it looks like this input may be in regular packed format,\n"
+              "so you might want to try \"packed\" instead.  Use --quiet to suppress this\n"
+              "warning.\n"
+              "*** END WARNING ***\n");
+        } else {
+          context.warning(
+              "*** WARNING ***\n"
+              "The input data does not appear to be the type that you specified.  I'll try\n"
+              "to parse it anyway, but if it doesn't look right, please verify that you\n"
+              "have the right type.  Use --quiet to suppress this warning.\n"
+              "*** END WARNING ***\n");
+        }
+        return true;
+    }
+
+    KJ_UNREACHABLE;
   }
 
 public:
   // -----------------------------------------------------------------
 
   kj::MainBuilder::Validity encode() {
-    kj::Vector<char> allText;
+    convertFrom = Format::TEXT;
+    convertTo = formatFromDeprecatedFlags(Format::BINARY);
+    return convert();
+  }
 
-    {
-      kj::FdInputStream rawInput(STDIN_FILENO);
-      kj::BufferedInputStreamWrapper input(rawInput);
-
-      for (;;) {
-        auto buf = input.tryGetReadBuffer();
-        if (buf.size() == 0) break;
-        allText.addAll(buf.asChars());
-        input.skip(buf.size());
-      }
+  kj::MainBuilder::Validity setEvalOutputFormat(kj::StringPtr format) {
+    KJ_IF_MAYBE(f, parseFormatName(format)) {
+      convertTo = *f;
+      return true;
+    } else {
+      return kj::str("unknown format: ", format);
     }
-
-    EncoderErrorReporter errorReporter(*this, allText);
-    MallocMessageBuilder arena;
-
-    // Lex the input.
-    auto lexedTokens = arena.initRoot<LexedTokens>();
-    lex(allText, lexedTokens, errorReporter);
-
-    // Set up the parser.
-    CapnpParser parser(arena.getOrphanage(), errorReporter);
-    auto tokens = lexedTokens.asReader().getTokens();
-    CapnpParser::ParserInput parserInput(tokens.begin(), tokens.end());
-
-    // Set up stuff for the ValueTranslator.
-    ValueResolverGlue resolver(compiler->getLoader(), errorReporter);
-
-    // Set up output stream.
-    kj::FdOutputStream rawOutput(STDOUT_FILENO);
-    kj::BufferedOutputStreamWrapper output(rawOutput);
-
-    while (parserInput.getPosition() != tokens.end()) {
-      KJ_IF_MAYBE(expression, parser.getParsers().expression(parserInput)) {
-        MallocMessageBuilder item(
-            segmentSize == 0 ? SUGGESTED_FIRST_SEGMENT_WORDS : segmentSize,
-            segmentSize == 0 ? SUGGESTED_ALLOCATION_STRATEGY : AllocationStrategy::FIXED_SIZE);
-        ValueTranslator translator(resolver, errorReporter, item.getOrphanage());
-
-        KJ_IF_MAYBE(value, translator.compileValue(expression->getReader(), rootType)) {
-          if (segmentSize == 0) {
-            writeFlat(value->getReader().as<DynamicStruct>(), output);
-          } else {
-            item.adoptRoot(value->releaseAs<DynamicStruct>());
-            if (packed) {
-              writePackedMessage(output, item);
-            } else {
-              writeMessage(output, item);
-            }
-          }
-        } else {
-          // Errors were reported, so we'll exit with a failure status later.
-        }
-      } else {
-        auto best = parserInput.getBest();
-        if (best == tokens.end()) {
-          context.exitError("Premature EOF.");
-        } else {
-          errorReporter.addErrorOn(*best, "Parse error.");
-          context.exit();
-        }
-      }
-    }
-
-    output.flush();
-    context.exit();
-    KJ_CLANG_KNOWS_THIS_IS_UNREACHABLE_BUT_GCC_DOESNT;
   }
 
   kj::MainBuilder::Validity evalConst(kj::StringPtr name) {
+    convertTo = formatFromDeprecatedFlags(convertTo);
+
     KJ_ASSERT(sourceFiles.size() == 1);
 
     auto parser = kj::parse::sequence(
@@ -1406,15 +1769,15 @@ public:
     }
 
     // OK, we have a value.  Print it.
-    if (binary || packed || flat) {
+    if (convertTo != Format::TEXT) {
       if (value.getType() != DynamicValue::STRUCT) {
         return "not a struct; binary output is only available on structs";
       }
 
-      kj::FdOutputStream rawOutput(STDOUT_FILENO);
-      kj::BufferedOutputStreamWrapper output(rawOutput);
-      writeFlat(value.as<DynamicStruct>(), output);
-      output.flush();
+      auto structValue = value.as<DynamicStruct>();
+      rootType = structValue.getSchema();
+      kj::FdOutputStream output(STDOUT_FILENO);
+      writeConversion(structValue, output);
       context.exit();
     } else {
       if (pretty && value.getType() == DynamicValue::STRUCT) {
@@ -1429,79 +1792,14 @@ public:
     KJ_CLANG_KNOWS_THIS_IS_UNREACHABLE_BUT_GCC_DOESNT;
   }
 
-private:
-  void writeFlat(DynamicStruct::Reader value, kj::BufferedOutputStream& output) {
-    // Always copy the message to a flat array so that the output is predictable (one segment,
-    // in canonical order).
-    size_t size = value.totalSize().wordCount + 1;
-    kj::Array<word> space = kj::heapArray<word>(size);
-    memset(space.begin(), 0, size * sizeof(word));
-    FlatMessageBuilder flatMessage(space);
-    flatMessage.setRoot(value);
-    flatMessage.requireFilled();
-
-    if (flat && packed) {
-      capnp::_::PackedOutputStream packer(output);
-      packer.write(space.begin(), space.size() * sizeof(word));
-    } else if (flat) {
-      output.write(space.begin(), space.size() * sizeof(word));
-    } else if (packed) {
-      writePackedMessage(output, flatMessage);
-    } else {
-      writeMessage(output, flatMessage);
-    }
-  }
-
-  class EncoderErrorReporter final: public ErrorReporter {
-  public:
-    EncoderErrorReporter(GlobalErrorReporter& globalReporter,
-                         kj::ArrayPtr<const char> content)
-      : globalReporter(globalReporter), lineBreaks(content) {}
-
-    void addError(uint32_t startByte, uint32_t endByte, kj::StringPtr message) override {
-      globalReporter.addError("<stdin>", lineBreaks.toSourcePos(startByte),
-                              lineBreaks.toSourcePos(endByte), message);
-    }
-
-    bool hadErrors() override {
-      return globalReporter.hadErrors();
-    }
-
-  private:
-    GlobalErrorReporter& globalReporter;
-    LineBreakTable lineBreaks;
-  };
-
-  class ValueResolverGlue final: public ValueTranslator::Resolver {
-  public:
-    ValueResolverGlue(const SchemaLoader& loader, ErrorReporter& errorReporter)
-        : loader(loader), errorReporter(errorReporter) {}
-
-    kj::Maybe<Schema> resolveType(uint64_t id) {
-      // Don't use tryGet() here because we shouldn't even be here if there were compile errors.
-      return loader.get(id);
-    }
-
-    kj::Maybe<DynamicValue::Reader> resolveConstant(Expression::Reader name) override {
-      errorReporter.addErrorOn(name, kj::str("External constants not allowed in encode input."));
-      return nullptr;
-    }
-
-    kj::Maybe<kj::Array<const byte>> readEmbed(LocatedText::Reader filename) override {
-      errorReporter.addErrorOn(filename, kj::str("External embeds not allowed in encode input."));
-      return nullptr;
-    }
-
-  private:
-    const SchemaLoader& loader;
-    ErrorReporter& errorReporter;
-  };
-
 public:
   // =====================================================================================
 
-  void addError(kj::StringPtr file, SourcePos start, SourcePos end,
+  void addError(const kj::ReadableDirectory& directory, kj::PathPtr path,
+                SourcePos start, SourcePos end,
                 kj::StringPtr message) override {
+    auto file = getDisplayName(directory, path);
+
     kj::String wholeMessage;
     if (end.line == start.line) {
       if (end.column == start.column) {
@@ -1526,6 +1824,7 @@ public:
 
 private:
   kj::ProcessContext& context;
+  kj::Own<kj::Filesystem> disk;
   ModuleLoader loader;
   kj::SpaceFor<Compiler> compilerSpace;
   bool compilerConstructed = false;
@@ -1539,8 +1838,28 @@ private:
   // of those schemas, plus the parent nodes of any dependencies.  This is what most code generators
   // require to function.
 
-  kj::Vector<kj::String> sourcePrefixes;
+  struct SourceDirectory {
+    kj::Own<const kj::ReadableDirectory> dir;
+    bool isSourcePrefix;
+  };
+
+  kj::HashMap<kj::Path, SourceDirectory> sourceDirectories;
+  // For each import path and source prefix, tracks the directory object we opened for it.
+  //
+  // Use via getSourceDirectory().
+
+  kj::HashMap<const kj::ReadableDirectory*, kj::String> dirPrefixes;
+  // For each open directory object, maps to a path prefix to add when displaying this path in
+  // error messages. This keeps track of the original directory name as given by the user, before
+  // canonicalization.
+  //
+  // Use via getDisplayName().
+
   bool addStandardImportPaths = true;
+
+  Format convertFrom = Format::BINARY;
+  Format convertTo = Format::BINARY;
+  // For the "convert" command.
 
   bool binary = false;
   bool flat = false;
@@ -1553,6 +1872,7 @@ private:
 
   struct SourceFile {
     uint64_t id;
+    Compiler::ModuleScope compiled;
     kj::StringPtr name;
     Module* module;
   };
@@ -1561,11 +1881,117 @@ private:
 
   struct OutputDirective {
     kj::ArrayPtr<const char> name;
-    kj::StringPtr dir;
+    kj::Maybe<kj::Path> dir;
+
+    KJ_DISALLOW_COPY(OutputDirective);
+    OutputDirective(OutputDirective&&) = default;
+    OutputDirective(kj::ArrayPtr<const char> name, kj::Maybe<kj::Path> dir)
+        : name(name), dir(kj::mv(dir)) {}
   };
   kj::Vector<OutputDirective> outputs;
 
   bool hadErrors_ = false;
+
+  kj::Maybe<const kj::ReadableDirectory&> getSourceDirectory(
+      kj::StringPtr pathStr, bool isSourcePrefix) {
+    auto cwd = disk->getCurrentPath();
+    auto path = cwd.evalNative(pathStr);
+
+    if (path.size() == 0) return disk->getRoot();
+
+    KJ_IF_MAYBE(sdir, sourceDirectories.find(path)) {
+      sdir->isSourcePrefix = sdir->isSourcePrefix || isSourcePrefix;
+      return *sdir->dir;
+    }
+
+    if (path == cwd) {
+      // Slight hack if the working directory is explicitly specified:
+      // - We want to avoid opening a new copy of the working directory, as tryOpenSubdir() would
+      //   do.
+      // - If isSourcePrefix is true, we need to add it to sourceDirectories to track that.
+      //   Otherwise we don't need to add it at all.
+      // - We do not need to add it to dirPrefixes since the cwd is already handled in
+      //   getDisplayName().
+      auto& result = disk->getCurrent();
+      if (isSourcePrefix) {
+        kj::Own<const kj::ReadableDirectory> fakeOwn(&result, kj::NullDisposer::instance);
+        sourceDirectories.insert(kj::mv(path), { kj::mv(fakeOwn), isSourcePrefix });
+      }
+      return result;
+    }
+
+    KJ_IF_MAYBE(dir, disk->getRoot().tryOpenSubdir(path)) {
+      auto& result = *dir->get();
+      sourceDirectories.insert(kj::mv(path), { kj::mv(*dir), isSourcePrefix });
+#if _WIN32
+      kj::String prefix = pathStr.endsWith("/") || pathStr.endsWith("\\")
+                        ? kj::str(pathStr) : kj::str(pathStr, '\\');
+#else
+      kj::String prefix = pathStr.endsWith("/") ? kj::str(pathStr) : kj::str(pathStr, '/');
+#endif
+      dirPrefixes.insert(&result, kj::mv(prefix));
+      return result;
+    } else {
+      return nullptr;
+    }
+  }
+
+  struct DirPathPair {
+    const kj::ReadableDirectory& dir;
+    kj::Path path;
+  };
+
+  DirPathPair interpretSourceFile(kj::StringPtr pathStr) {
+    auto cwd = disk->getCurrentPath();
+    auto path = cwd.evalNative(pathStr);
+
+    KJ_REQUIRE(path.size() > 0);
+    for (size_t i = path.size() - 1; i > 0; i--) {
+      auto prefix = path.slice(0, i);
+      auto remainder = path.slice(i, path.size());
+
+      KJ_IF_MAYBE(sdir, sourceDirectories.find(prefix)) {
+        if (sdir->isSourcePrefix) {
+          return { *sdir->dir, remainder.clone() };
+        }
+      }
+    }
+
+    // No source prefix matched. Fall back to heuristic: try stripping the current directory,
+    // otherwise don't strip anything.
+    if (path.startsWith(cwd)) {
+      return { disk->getCurrent(), path.slice(cwd.size(), path.size()).clone() };
+    } else {
+      // Hmm, no src-prefix matched and the file isn't even in the current directory. This might
+      // be OK if we aren't generating any output anyway, but otherwise the results will almost
+      // certainly not be what the user wanted. Let's print a warning, unless the output directives
+      // are ones which we know do not produce output files. This is a hack.
+      for (auto& output: outputs) {
+        auto name = kj::str(output.name);
+        if (name != "-" && name != "capnp") {
+          context.warning(kj::str(pathStr,
+              ": File is not in the current directory and does not match any prefix defined with "
+              "--src-prefix. Please pass an appropriate --src-prefix so I can figure out where to "
+              "write the output for this file."));
+          break;
+        }
+      }
+
+      return { disk->getRoot(), kj::mv(path) };
+    }
+  }
+
+  kj::String getDisplayName(const kj::ReadableDirectory& dir, kj::PathPtr path) {
+    KJ_IF_MAYBE(prefix, dirPrefixes.find(&dir)) {
+      return kj::str(*prefix, path.toNativeString());
+    } else if (&dir == &disk->getRoot()) {
+      return path.toNativeString(true);
+    } else if (&dir == &disk->getCurrent()) {
+      return path.toNativeString(false);
+    } else {
+      KJ_FAIL_ASSERT("unrecognized directory");
+    }
+  }
 };
 
 }  // namespace compiler

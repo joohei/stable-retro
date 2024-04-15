@@ -19,18 +19,15 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 // THE SOFTWARE.
 
-#ifndef CAPNP_RAW_SCHEMA_H_
-#define CAPNP_RAW_SCHEMA_H_
-
-#if defined(__GNUC__) && !defined(CAPNP_HEADER_WARNINGS)
-#pragma GCC system_header
-#endif
+#pragma once
 
 #include "common.h"  // for uint and friends
 
-#if _MSC_VER
+#if _MSC_VER && !defined(__clang__)
 #include <atomic>
 #endif
+
+CAPNP_BEGIN_HEADER
 
 namespace capnp {
 namespace _ {  // private
@@ -148,7 +145,7 @@ struct RawBrandedSchema {
     // is required in particular when traversing the dependency list.  RawSchemas for compiled-in
     // types are always initialized; only dynamically-loaded schemas may be lazy.
 
-#if __GNUC__
+#if __GNUC__ || defined(__clang__)
     const Initializer* i = __atomic_load_n(&lazyInitializer, __ATOMIC_ACQUIRE);
 #elif _MSC_VER
     const Initializer* i = *static_cast<Initializer const* const volatile*>(&lazyInitializer);
@@ -214,7 +211,7 @@ struct RawSchema {
     // is required in particular when traversing the dependency list.  RawSchemas for compiled-in
     // types are always initialized; only dynamically-loaded schemas may be lazy.
 
-#if __GNUC__
+#if __GNUC__ || defined(__clang__)
     const Initializer* i = __atomic_load_n(&lazyInitializer, __ATOMIC_ACQUIRE);
 #elif _MSC_VER
     const Initializer* i = *static_cast<Initializer const* const volatile*>(&lazyInitializer);
@@ -239,4 +236,4 @@ inline bool RawBrandedSchema::isUnbound() const {
 }  // namespace _ (private)
 }  // namespace capnp
 
-#endif  // CAPNP_RAW_SCHEMA_H_
+CAPNP_END_HEADER

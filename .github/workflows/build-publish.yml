@@ -7,7 +7,6 @@
 name: build-publish
 
 on:
-  workflow_dispatch:
   push:
     branches: [master]
   pull_request:
@@ -16,75 +15,161 @@ on:
     types: [published]
 
 jobs:
-  build_wheels:
-    name: Build wheels on ${{ matrix.os }}
-    runs-on: ${{ matrix.os }}
+  build-linux:
+    runs-on: ubuntu-latest
+
     strategy:
       matrix:
-        os: [ubuntu-22.04] #, macos-11] - disable macos, as it's not working for a moment
+        python-version: ['3.7', '3.8', '3.9', '3.10']
 
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
-      - name: Set up QEMU
-        if: runner.os == 'Linux'
-        uses: docker/setup-qemu-action@v2
+      - name: Set up environment
+        run: |
+          sudo apt update
+          sudo apt-get install -y build-essential cmake freeglut3-dev libzip-dev
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v4
         with:
-          platforms: all
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install packages
+        run: |
+          python -m pip install -U pip
+          pip install -U build setuptools virtualenv wheel
 
       - name: Build wheels
-        uses: pypa/cibuildwheel@v2.15.0
-        env:
-          # Configure cibuildwheel to build native archs, and some emulated ones
-          CIBW_ARCHS_LINUX: x86_64 # aarch64 - disable ARM, as it's not working for a moment
-          #CIBW_ARCHS_MACOS: x86_64 arm64 - macos is disabled for a moment
-          CIBW_BUILD_VERBOSITY: 3  # Increase verbosity to see what's going on
-          CIBW_REPAIR_WHEEL_COMMAND_LINUX: >  # Print additional info from auditwheel
-            auditwheel show {wheel} && auditwheel repair -w {dest_dir} {wheel}
+        run: python -m build -sw
 
-      - name: Report built wheels
+      - name: Store wheels
+        uses: actions/upload-artifact@v3
+        with:
+          name: Linux Python ${{ matrix.python-version }}
+          path: dist
+
+  build-windows:
+    runs-on: windows-latest
+
+    strategy:
+      matrix:
+        python-version: ['3.9', '3.10']
+        msystem: ['UCRT64', 'MINGW64']
+        include:
+          - python-version: '3.9'
+            branch: 'mingw-v3.9.13'
+          - python-version: '3.10'
+            branch: 'mingw-v3.10.12'
+          - msystem: UCRT64
+            prefix: mingw-w64-ucrt-x86_64
+          - msystem: MINGW64
+            prefix: mingw-w64-x86_64
+
+    defaults:
+      run:
+        shell: msys2 {0}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up environment
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: ${{ matrix.msystem }}
+          update: true
+          install: >-
+            autoconf-archive
+            git
+            ${{ matrix.prefix }}-autotools
+            ${{ matrix.prefix }}-cmake
+            ${{ matrix.prefix }}-freeglut
+            ${{ matrix.prefix }}-gcc
+            ${{ matrix.prefix }}-libffi
+            ${{ matrix.prefix }}-libzip
+            ${{ matrix.prefix }}-make
+            ${{ matrix.prefix }}-mpdecimal
+            ${{ matrix.prefix }}-ncurses
+            ${{ matrix.prefix }}-openblas
+            ${{ matrix.prefix }}-sqlite3
+            ${{ matrix.prefix }}-tcl
+            ${{ matrix.prefix }}-tk
+            ${{ matrix.prefix }}-tzdata
+
+      - name: Set up Python ${{ matrix.python-version }}
         run: |
-          ls -l ./wheelhouse/*.whl
+          git clone -b ${{ matrix.branch }} https://github.com/msys2-contrib/cpython-mingw
+          cd cpython-mingw
+          autoreconf -fi
+          ./configure \
+            --enable-shared \
+            --enable-optimizations \
+            --with-ensurepip=no \
+            --with-system-expat \
+            --with-system-ffi \
+            --with-system-libmpdec \
+            --with-tzpath=${MINGW_PREFIX}/share/zoneinfo
+          make -j$(nproc)
+          make install DESTDIR=tmp
+          cp -rf tmp/* /
+          python3 -m ensurepip
 
-      - name: Upload artifacts
+      - name: Clean up
+        run: |
+          rm -rf cpython-mingw
+
+      - name: Install packages
+        run: |
+          export SETUPTOOLS_USE_DISTUTILS=stdlib
+          python3 -m pip install -U pip
+          pip install -U build setuptools virtualenv wheel
+
+      - name: Build wheels
+        run: python3 -m build -sw
+
+      - name: Store wheels
         uses: actions/upload-artifact@v3
         with:
-          path: ./wheelhouse/*.whl
+          name: ${{ matrix.msystem }} Python ${{ matrix.python-version }}
+          path: dist
 
-  build_sdist:
-    name: Build source distribution
+  display:
     runs-on: ubuntu-latest
+
+    needs: [build-linux, build-windows]
+
     steps:
-      - uses: actions/checkout@v3
-
-      - name: Build sdist
-        run: pipx run build --sdist
-
-      - name: Upload sdist
-        uses: actions/upload-artifact@v3
-        with:
-          path: dist/*.tar.gz
-
-  upload_pypi:
-    needs: [build_wheels, build_sdist]
-    runs-on: ubuntu-latest
-    environment: pypi
-    permissions:
-      id-token: write
-    if: github.event_name == 'release' && github.event.action == 'published'
-    steps:
-      - name: Download all dists
+      - name: Download wheels
         uses: actions/download-artifact@v3
         with:
-          # Unpacks default artifact into dist/
-          # If `name: artifact` is omitted, the action will create extra parent dir
-          name: artifact
-          path: dist
+          path: tmp
+
+      - name: Pack wheels together
+        run: |
+          mkdir dist
+          cp tmp/**/* dist
+
+      - name: Display wheels
+        run: ls dist
+
+  publish:
+    runs-on: ubuntu-latest
+
+    needs: [build-linux, build-windows]
+
+    if: github.event_name == 'release' && github.event.action == 'published'
+    steps:
+      - name: Download wheels
+        uses: actions/download-artifact@v3
+        with:
+          path: tmp
+
+      - name: Pack wheels together
+        run: |
+          mkdir dist
+          cp tmp/**/* dist
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           password: ${{ secrets.PYPI_API_TOKEN }}
-        # To test:
-        # with:
-        #   repository_url: https://test.pypi.org/legacy/

@@ -19,6 +19,8 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 // THE SOFTWARE.
 
+#define CAPNP_TESTING_CAPNP 1
+
 #include "schema-loader.h"
 #include <kj/compat/gtest.h>
 #include "test-util.h"
@@ -385,6 +387,17 @@ TEST(SchemaLoader, Generics) {
 
     EXPECT_TRUE(results.getFieldByName("gen").getType().asStruct() == branded);
   }
+}
+
+TEST(SchemaLoader, LoadStreaming) {
+  SchemaLoader loader;
+
+  InterfaceSchema schema =
+      loader.load(Schema::from<test::TestStreaming>().getProto()).asInterface();
+
+  auto results = schema.getMethodByName("doStreamI").getResultType();
+  KJ_EXPECT(results.isStreamResult());
+  KJ_EXPECT(results.getShortDisplayName() == "StreamResult", results.getShortDisplayName());
 }
 
 }  // namespace

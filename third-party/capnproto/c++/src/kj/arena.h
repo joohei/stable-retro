@@ -19,16 +19,13 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 // THE SOFTWARE.
 
-#ifndef KJ_ARENA_H_
-#define KJ_ARENA_H_
-
-#if defined(__GNUC__) && !KJ_HEADER_WARNINGS
-#pragma GCC system_header
-#endif
+#pragma once
 
 #include "memory.h"
 #include "array.h"
 #include "string.h"
+
+KJ_BEGIN_HEADER
 
 namespace kj {
 
@@ -210,4 +207,4 @@ ArrayBuilder<T> Arena::allocateOwnArrayBuilder(size_t capacity) {
 
 }  // namespace kj
 
-#endif  // KJ_ARENA_H_
+KJ_END_HEADER

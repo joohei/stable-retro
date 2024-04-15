@@ -2,9 +2,9 @@
 
 #include "gtest/gtest.h"
 
+#include <memory>
 #include <functional>
 #include <map>
-#include <memory>
 #include <string>
 
 #include <fcntl.h>

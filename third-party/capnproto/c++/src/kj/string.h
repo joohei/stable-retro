@@ -19,23 +19,38 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 // THE SOFTWARE.
 
-#ifndef KJ_STRING_H_
-#define KJ_STRING_H_
-
-#if defined(__GNUC__) && !KJ_HEADER_WARNINGS
-#pragma GCC system_header
-#endif
+#pragma once
 
 #include <initializer_list>
 #include "array.h"
 #include <string.h>
 
+KJ_BEGIN_HEADER
+
 namespace kj {
+  class StringPtr;
+  class String;
 
-class StringPtr;
-class String;
+  class StringTree;   // string-tree.h
+}
 
-class StringTree;   // string-tree.h
+constexpr kj::StringPtr operator "" _kj(const char* str, size_t n);
+// You can append _kj to a string literal to make its type be StringPtr. There are a few cases
+// where you must do this for correctness:
+// - When you want to declare a constexpr StringPtr. Without _kj, this is a compile error.
+// - When you want to initialize a static/global StringPtr from a string literal without forcing
+//   global constructor code to run at dynamic initialization time.
+// - When you have a string literal that contains NUL characters. Without _kj, the string will
+//   be considered to end at the first NUL.
+// - When you want to initialize an ArrayPtr<const char> from a string literal, without including
+//   the NUL terminator in the data. (Initializing an ArrayPtr from a regular string literal is
+//   a compile error specifically due to this ambiguity.)
+//
+// In other cases, there should be no difference between initializing a StringPtr from a regular
+// string literal vs. one with _kj (assuming the compiler is able to optimize away strlen() on a
+// string literal).
+
+namespace kj {
 
 // Our STL string SFINAE trick does not work with GCC 4.7, but it works with Clang and GCC 4.8, so
 // we'll just preprocess it out if not supported.
@@ -54,16 +69,31 @@ class StringPtr {
 public:
   inline StringPtr(): content("", 1) {}
   inline StringPtr(decltype(nullptr)): content("", 1) {}
-  inline StringPtr(const char* value): content(value, strlen(value) + 1) {}
-  inline StringPtr(const char* value, size_t size): content(value, size + 1) {
+  inline StringPtr(const char* value KJ_LIFETIMEBOUND): content(value, strlen(value) + 1) {}
+  inline StringPtr(const char* value KJ_LIFETIMEBOUND, size_t size): content(value, size + 1) {
     KJ_IREQUIRE(value[size] == '\0', "StringPtr must be NUL-terminated.");
   }
-  inline StringPtr(const char* begin, const char* end): StringPtr(begin, end - begin) {}
-  inline StringPtr(const String& value);
+  inline StringPtr(const char* begin KJ_LIFETIMEBOUND, const char* end KJ_LIFETIMEBOUND): StringPtr(begin, end - begin) {}
+  inline StringPtr(String&& value KJ_LIFETIMEBOUND) : StringPtr(value) {}
+  inline StringPtr(const String& value KJ_LIFETIMEBOUND);
+  StringPtr& operator=(String&& value) = delete;
+  inline StringPtr& operator=(decltype(nullptr)) {
+    content = ArrayPtr<const char>("", 1);
+    return *this;
+  }
+
+#if __cpp_char8_t
+  inline StringPtr(const char8_t* value KJ_LIFETIMEBOUND): StringPtr(reinterpret_cast<const char*>(value)) {}
+  inline StringPtr(const char8_t* value KJ_LIFETIMEBOUND, size_t size)
+      : StringPtr(reinterpret_cast<const char*>(value), size) {}
+  inline StringPtr(const char8_t* begin KJ_LIFETIMEBOUND, const char8_t* end KJ_LIFETIMEBOUND)
+      : StringPtr(reinterpret_cast<const char*>(begin), reinterpret_cast<const char*>(end)) {}
+  // KJ strings are and always have been UTF-8, so screw this C++20 char8_t stuff.
+#endif
 
 #if KJ_COMPILER_SUPPORTS_STL_STRING_INTEROP
   template <typename T, typename = decltype(instance<T>().c_str())>
-  inline StringPtr(const T& t): StringPtr(t.c_str()) {}
+  inline StringPtr(const T& t KJ_LIFETIMEBOUND): StringPtr(t.c_str()) {}
   // Allow implicit conversion from any class that has a c_str() method (namely, std::string).
   // We use a template trick to detect std::string in order to avoid including the header for
   // those who don't want it.
@@ -75,8 +105,8 @@ public:
   // those who don't want it.
 #endif
 
-  inline operator ArrayPtr<const char>() const;
-  inline ArrayPtr<const char> asArray() const;
+  inline constexpr operator ArrayPtr<const char>() const;
+  inline constexpr ArrayPtr<const char> asArray() const;
   inline ArrayPtr<const byte> asBytes() const { return asArray().asBytes(); }
   // Result does not include NUL terminator.
 
@@ -88,14 +118,18 @@ public:
 
   inline char operator[](size_t index) const { return content[index]; }
 
-  inline const char* begin() const { return content.begin(); }
-  inline const char* end() const { return content.end() - 1; }
+  inline constexpr const char* begin() const { return content.begin(); }
+  inline constexpr const char* end() const { return content.end() - 1; }
 
-  inline bool operator==(decltype(nullptr)) const { return content.size() <= 1; }
-  inline bool operator!=(decltype(nullptr)) const { return content.size() > 1; }
+  inline constexpr bool operator==(decltype(nullptr)) const { return content.size() <= 1; }
+#if !__cpp_impl_three_way_comparison
+  inline constexpr bool operator!=(decltype(nullptr)) const { return content.size() > 1; }
+#endif
 
   inline bool operator==(const StringPtr& other) const;
+#if !__cpp_impl_three_way_comparison
   inline bool operator!=(const StringPtr& other) const { return !(*this == other); }
+#endif
   inline bool operator< (const StringPtr& other) const;
   inline bool operator> (const StringPtr& other) const { return other < *this; }
   inline bool operator<=(const StringPtr& other) const { return !(other < *this); }
@@ -121,13 +155,18 @@ public:
   // Overflowed floating numbers return inf.
 
 private:
-  inline StringPtr(ArrayPtr<const char> content): content(content) {}
+  inline explicit constexpr StringPtr(ArrayPtr<const char> content): content(content) {}
 
   ArrayPtr<const char> content;
+
+  friend constexpr kj::StringPtr (::operator "" _kj)(const char* str, size_t n);
+  friend class SourceLocation;
 };
 
+#if !__cpp_impl_three_way_comparison
 inline bool operator==(const char* a, const StringPtr& b) { return b == a; }
 inline bool operator!=(const char* a, const StringPtr& b) { return b != a; }
+#endif
 
 template <> char StringPtr::parseAs<char>() const;
 template <> signed char StringPtr::parseAs<signed char>() const;
@@ -162,30 +201,35 @@ public:
   inline explicit String(Array<char> buffer);
   // Does not copy.  Requires `buffer` ends with `\0`.
 
-  inline operator ArrayPtr<char>();
-  inline operator ArrayPtr<const char>() const;
-  inline ArrayPtr<char> asArray();
-  inline ArrayPtr<const char> asArray() const;
-  inline ArrayPtr<byte> asBytes() { return asArray().asBytes(); }
-  inline ArrayPtr<const byte> asBytes() const { return asArray().asBytes(); }
+  inline operator ArrayPtr<char>() KJ_LIFETIMEBOUND;
+  inline operator ArrayPtr<const char>() const KJ_LIFETIMEBOUND;
+  inline ArrayPtr<char> asArray() KJ_LIFETIMEBOUND;
+  inline ArrayPtr<const char> asArray() const KJ_LIFETIMEBOUND;
+  inline ArrayPtr<byte> asBytes() KJ_LIFETIMEBOUND { return asArray().asBytes(); }
+  inline ArrayPtr<const byte> asBytes() const KJ_LIFETIMEBOUND { return asArray().asBytes(); }
   // Result does not include NUL terminator.
+
+  inline StringPtr asPtr() const KJ_LIFETIMEBOUND {
+    // Convenience operator to return a StringPtr.
+    return StringPtr{*this};
+  }
 
   inline Array<char> releaseArray() { return kj::mv(content); }
   // Disowns the backing array (which includes the NUL terminator) and returns it. The String value
   // is clobbered (as if moved away).
 
-  inline const char* cStr() const;
+  inline const char* cStr() const KJ_LIFETIMEBOUND;
 
   inline size_t size() const;
   // Result does not include NUL terminator.
 
   inline char operator[](size_t index) const;
-  inline char& operator[](size_t index);
+  inline char& operator[](size_t index) KJ_LIFETIMEBOUND;
 
-  inline char* begin();
-  inline char* end();
-  inline const char* begin() const;
-  inline const char* end() const;
+  inline char* begin() KJ_LIFETIMEBOUND;
+  inline char* end() KJ_LIFETIMEBOUND;
+  inline const char* begin() const KJ_LIFETIMEBOUND;
+  inline const char* end() const KJ_LIFETIMEBOUND;
 
   inline bool operator==(decltype(nullptr)) const { return content.size() <= 1; }
   inline bool operator!=(decltype(nullptr)) const { return content.size() > 1; }
@@ -197,11 +241,23 @@ public:
   inline bool operator<=(const StringPtr& other) const { return StringPtr(*this) <= other; }
   inline bool operator>=(const StringPtr& other) const { return StringPtr(*this) >= other; }
 
+  inline bool operator==(const String& other) const { return StringPtr(*this) == StringPtr(other); }
+  inline bool operator!=(const String& other) const { return StringPtr(*this) != StringPtr(other); }
+  inline bool operator< (const String& other) const { return StringPtr(*this) <  StringPtr(other); }
+  inline bool operator> (const String& other) const { return StringPtr(*this) >  StringPtr(other); }
+  inline bool operator<=(const String& other) const { return StringPtr(*this) <= StringPtr(other); }
+  inline bool operator>=(const String& other) const { return StringPtr(*this) >= StringPtr(other); }
+  // Note that if we don't overload for `const String&` specifically, then C++20 will decide that
+  // comparisons between two strings are ambiguous. (Clang turns this into a warning,
+  // -Wambiguous-reversed-operator, due to the stupidity...)
+
   inline bool startsWith(const StringPtr& other) const { return StringPtr(*this).startsWith(other);}
   inline bool endsWith(const StringPtr& other) const { return StringPtr(*this).endsWith(other); }
 
-  inline StringPtr slice(size_t start) const { return StringPtr(*this).slice(start); }
-  inline ArrayPtr<const char> slice(size_t start, size_t end) const {
+  inline StringPtr slice(size_t start) const KJ_LIFETIMEBOUND {
+    return StringPtr(*this).slice(start);
+  }
+  inline ArrayPtr<const char> slice(size_t start, size_t end) const KJ_LIFETIMEBOUND {
     return StringPtr(*this).slice(start, end);
   }
 
@@ -216,8 +272,10 @@ private:
   Array<char> content;
 };
 
+#if !__cpp_impl_three_way_comparison
 inline bool operator==(const char* a, const String& b) { return b == a; }
 inline bool operator!=(const char* a, const String& b) { return b != a; }
+#endif
 
 String heapString(size_t size);
 // Allocate a String of the given size on the heap, not including NUL terminator.  The NUL
@@ -245,9 +303,12 @@ inline size_t sum(std::initializer_list<size_t> nums) {
 }
 
 inline char* fill(char* ptr) { return ptr; }
+inline char* fillLimited(char* ptr, char* limit) { return ptr; }
 
 template <typename... Rest>
 char* fill(char* __restrict__ target, const StringTree& first, Rest&&... rest);
+template <typename... Rest>
+char* fillLimited(char* __restrict__ target, char* limit, const StringTree& first, Rest&&... rest);
 // Make str() work with stringifiers that return StringTree by patching fill().
 //
 // Defined in string-tree.h.
@@ -276,6 +337,31 @@ inline String concat(String&& arr) {
   return kj::mv(arr);
 }
 
+template <typename First, typename... Rest>
+char* fillLimited(char* __restrict__ target, char* limit, const First& first, Rest&&... rest) {
+  auto i = first.begin();
+  auto end = first.end();
+  while (i != end) {
+    if (target == limit) return target;
+    *target++ = *i++;
+  }
+  return fillLimited(target, limit, kj::fwd<Rest>(rest)...);
+}
+
+template <typename T>
+class Delimited;
+// Delimits a sequence of type T with a string delimiter. Implements kj::delimited().
+
+template <typename T, typename... Rest>
+char* fill(char* __restrict__ target, Delimited<T>&& first, Rest&&... rest);
+template <typename T, typename... Rest>
+char* fillLimited(char* __restrict__ target, char* limit, Delimited<T>&& first,Rest&&... rest);
+template <typename T, typename... Rest>
+char* fill(char* __restrict__ target, Delimited<T>& first, Rest&&... rest);
+template <typename T, typename... Rest>
+char* fillLimited(char* __restrict__ target, char* limit, Delimited<T>& first,Rest&&... rest);
+// As with StringTree, we special-case Delimited<T>.
+
 struct Stringifier {
   // This is a dummy type with only one instance: STR (below).  To make an arbitrary type
   // stringifiable, define `operator*(Stringifier, T)` to return an iterable container of `char`.
@@ -291,14 +377,29 @@ struct Stringifier {
 
   inline ArrayPtr<const char> operator*(ArrayPtr<const char> s) const { return s; }
   inline ArrayPtr<const char> operator*(ArrayPtr<char> s) const { return s; }
-  inline ArrayPtr<const char> operator*(const Array<const char>& s) const { return s; }
-  inline ArrayPtr<const char> operator*(const Array<char>& s) const { return s; }
+  inline ArrayPtr<const char> operator*(const Array<const char>& s) const KJ_LIFETIMEBOUND {
+    return s;
+  }
+  inline ArrayPtr<const char> operator*(const Array<char>& s) const KJ_LIFETIMEBOUND { return s; }
   template<size_t n>
-  inline ArrayPtr<const char> operator*(const CappedArray<char, n>& s) const { return s; }
+  inline ArrayPtr<const char> operator*(const CappedArray<char, n>& s) const KJ_LIFETIMEBOUND {
+    return s;
+  }
   template<size_t n>
-  inline ArrayPtr<const char> operator*(const FixedArray<char, n>& s) const { return s; }
-  inline ArrayPtr<const char> operator*(const char* s) const { return arrayPtr(s, strlen(s)); }
-  inline ArrayPtr<const char> operator*(const String& s) const { return s.asArray(); }
+  inline ArrayPtr<const char> operator*(const FixedArray<char, n>& s) const KJ_LIFETIMEBOUND {
+    return s;
+  }
+  inline ArrayPtr<const char> operator*(const char* s) const KJ_LIFETIMEBOUND {
+    return arrayPtr(s, strlen(s));
+  }
+#if __cpp_char8_t
+  inline ArrayPtr<const char> operator*(const char8_t* s) const KJ_LIFETIMEBOUND {
+    return operator*(reinterpret_cast<const char*>(s));
+  }
+#endif
+  inline ArrayPtr<const char> operator*(const String& s) const KJ_LIFETIMEBOUND {
+    return s.asArray();
+  }
   inline ArrayPtr<const char> operator*(const StringPtr& s) const { return s.asArray(); }
 
   inline Range<char> operator*(const Range<char>& r) const { return r; }
@@ -325,12 +426,7 @@ struct Stringifier {
   CappedArray<char, sizeof(unsigned long long) * 3 + 2> operator*(unsigned long long i) const;
   CappedArray<char, 24> operator*(float f) const;
   CappedArray<char, 32> operator*(double f) const;
-  CappedArray<char, sizeof(const void*) * 3 + 2> operator*(const void* s) const;
-
-  template <typename T>
-  String operator*(ArrayPtr<T> arr) const;
-  template <typename T>
-  String operator*(const Array<T>& arr) const;
+  CappedArray<char, sizeof(const void*) * 2 + 1> operator*(const void* s) const;
 
 #if KJ_COMPILER_SUPPORTS_STL_STRING_INTEROP  // supports expression SFINAE?
   template <typename T, typename Result = decltype(instance<T>().toString())>
@@ -375,6 +471,10 @@ inline String str(String&& s) { return mv(s); }
 // Overload to prevent redundant allocation.
 
 template <typename T>
+_::Delimited<T> delimited(T&& arr, kj::StringPtr delim);
+// Use to stringify an array.
+
+template <typename T>
 String strArray(T&& arr, const char* delim) {
   size_t delimLen = strlen(delim);
   KJ_STACK_ARRAY(decltype(_::STR * arr[0]), pieces, kj::size(arr), 8, 32);
@@ -397,25 +497,47 @@ String strArray(T&& arr, const char* delim) {
   return result;
 }
 
-namespace _ {  // private
+template <typename... Params>
+StringPtr strPreallocated(ArrayPtr<char> buffer, Params&&... params) {
+  // Like str() but writes into a preallocated buffer. If the buffer is not long enough, the result
+  // is truncated (but still NUL-terminated).
+  //
+  // This can be used like:
+  //
+  //     char buffer[256];
+  //     StringPtr text = strPreallocated(buffer, params...);
+  //
+  // This is useful for optimization. It can also potentially be used safely in async signal
+  // handlers. HOWEVER, to use in an async signal handler, all of the stringifiers for the inputs
+  // must also be signal-safe. KJ guarantees signal safety when stringifying any built-in integer
+  // type (but NOT floating-points), basic char/byte sequences (ArrayPtr<byte>, String, etc.), as
+  // well as Array<T> as long as T can also be stringified safely. To safely stringify a delimited
+  // array, you must use kj::delimited(arr, delim) rather than the deprecated
+  // kj::strArray(arr, delim).
 
-template <typename T>
-inline String Stringifier::operator*(ArrayPtr<T> arr) const {
-  return strArray(arr, ", ");
+  char* end = _::fillLimited(buffer.begin(), buffer.end() - 1,
+      toCharSequence(kj::fwd<Params>(params))...);
+  *end = '\0';
+  return StringPtr(buffer.begin(), end);
 }
 
-template <typename T>
-inline String Stringifier::operator*(const Array<T>& arr) const {
-  return strArray(arr, ", ");
+template <typename T, typename = decltype(toCharSequence(kj::instance<T&>()))>
+inline _::Delimited<ArrayPtr<T>> operator*(const _::Stringifier&, ArrayPtr<T> arr) {
+  return _::Delimited<ArrayPtr<T>>(arr, ", ");
 }
 
-}  // namespace _ (private)
+template <typename T, typename = decltype(toCharSequence(kj::instance<const T&>()))>
+inline _::Delimited<ArrayPtr<const T>> operator*(const _::Stringifier&, const Array<T>& arr) {
+  return _::Delimited<ArrayPtr<const T>>(arr, ", ");
+}
 
 #define KJ_STRINGIFY(...) operator*(::kj::_::Stringifier, __VA_ARGS__)
 // Defines a stringifier for a custom type.  Example:
 //
 //    class Foo {...};
 //    inline StringPtr KJ_STRINGIFY(const Foo& foo) { return foo.name(); }
+//      // or perhaps
+//    inline String KJ_STRINGIFY(const Foo& foo) { return kj::str(foo.fld1(), ",", foo.fld2()); }
 //
 // This allows Foo to be passed to str().
 //
@@ -425,14 +547,14 @@ inline String Stringifier::operator*(const Array<T>& arr) const {
 // =======================================================================================
 // Inline implementation details.
 
-inline StringPtr::StringPtr(const String& value): content(value.begin(), value.size() + 1) {}
+inline StringPtr::StringPtr(const String& value): content(value.cStr(), value.size() + 1) {}
 
-inline StringPtr::operator ArrayPtr<const char>() const {
-  return content.slice(0, content.size() - 1);
+inline constexpr StringPtr::operator ArrayPtr<const char>() const {
+  return ArrayPtr<const char>(content.begin(), content.size() - 1);
 }
 
-inline ArrayPtr<const char> StringPtr::asArray() const {
-  return content.slice(0, content.size() - 1);
+inline constexpr ArrayPtr<const char> StringPtr::asArray() const {
+  return ArrayPtr<const char>(content.begin(), content.size() - 1);
 }
 
 inline bool StringPtr::operator==(const StringPtr& other) const {
@@ -529,6 +651,115 @@ inline String heapString(ArrayPtr<const char> value) {
   return heapString(value.begin(), value.size());
 }
 
+namespace _ {  // private
+
+template <typename T>
+class Delimited {
+public:
+  Delimited(T array, kj::StringPtr delimiter)
+      : array(kj::fwd<T>(array)), delimiter(delimiter) {}
+
+  // TODO(someday): In theory we should support iteration as a character sequence, but the iterator
+  //   will be pretty complicated.
+
+  size_t size() {
+    ensureStringifiedInitialized();
+
+    size_t result = 0;
+    bool first = true;
+    for (auto& e: stringified) {
+      if (first) {
+        first = false;
+      } else {
+        result += delimiter.size();
+      }
+      result += e.size();
+    }
+    return result;
+  }
+
+  char* flattenTo(char* __restrict__ target) {
+    ensureStringifiedInitialized();
+
+    bool first = true;
+    for (auto& elem: stringified) {
+      if (first) {
+        first = false;
+      } else {
+        target = fill(target, delimiter);
+      }
+      target = fill(target, elem);
+    }
+    return target;
+  }
+
+  char* flattenTo(char* __restrict__ target, char* limit) {
+    // This is called in the strPreallocated(). We want to avoid allocation. size() will not have
+    // been called in this case, so hopefully `stringified` is still uninitialized. We will
+    // stringify each item and immediately use it.
+    bool first = true;
+    for (auto&& elem: array) {
+      if (target == limit) return target;
+      if (first) {
+        first = false;
+      } else {
+        target = fillLimited(target, limit, delimiter);
+      }
+      target = fillLimited(target, limit, kj::toCharSequence(elem));
+    }
+    return target;
+  }
+
+private:
+  typedef decltype(toCharSequence(*instance<T>().begin())) StringifiedItem;
+  T array;
+  kj::StringPtr delimiter;
+  Array<StringifiedItem> stringified;
+
+  void ensureStringifiedInitialized() {
+    if (array.size() > 0 && stringified.size() == 0) {
+      stringified = KJ_MAP(e, array) { return toCharSequence(e); };
+    }
+  }
+};
+
+template <typename T, typename... Rest>
+char* fill(char* __restrict__ target, Delimited<T>&& first, Rest&&... rest) {
+  target = first.flattenTo(target);
+  return fill(target, kj::fwd<Rest>(rest)...);
+}
+template <typename T, typename... Rest>
+char* fillLimited(char* __restrict__ target, char* limit, Delimited<T>&& first, Rest&&... rest) {
+  target = first.flattenTo(target, limit);
+  return fillLimited(target, limit, kj::fwd<Rest>(rest)...);
+}
+template <typename T, typename... Rest>
+char* fill(char* __restrict__ target, Delimited<T>& first, Rest&&... rest) {
+  target = first.flattenTo(target);
+  return fill(target, kj::fwd<Rest>(rest)...);
+}
+template <typename T, typename... Rest>
+char* fillLimited(char* __restrict__ target, char* limit, Delimited<T>& first, Rest&&... rest) {
+  target = first.flattenTo(target, limit);
+  return fillLimited(target, limit, kj::fwd<Rest>(rest)...);
+}
+
+template <typename T>
+inline Delimited<T>&& KJ_STRINGIFY(Delimited<T>&& delimited) { return kj::mv(delimited); }
+template <typename T>
+inline const Delimited<T>& KJ_STRINGIFY(const Delimited<T>& delimited) { return delimited; }
+
+}  // namespace _ (private)
+
+template <typename T>
+_::Delimited<T> delimited(T&& arr, kj::StringPtr delim) {
+  return _::Delimited<T>(kj::fwd<T>(arr), delim);
+}
+
 }  // namespace kj
 
-#endif  // KJ_STRING_H_
+constexpr kj::StringPtr operator "" _kj(const char* str, size_t n) {
+  return kj::StringPtr(kj::ArrayPtr<const char>(str, n + 1));
+};
+
+KJ_END_HEADER

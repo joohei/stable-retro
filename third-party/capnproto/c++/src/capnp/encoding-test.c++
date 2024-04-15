@@ -1471,6 +1471,57 @@ TEST(Encoding, ListSetters) {
       dst.set(0, src[0]);
       dst.set(1, src[1]);
     }
+
+    checkTestMessage(root2);
+
+    // Now let's do some adopting and disowning.
+    auto adopter = builder2.getOrphanage().newOrphan<test::TestLists>();
+    auto disowner = root2.disownLists();
+
+    adopter.get().adoptList0(disowner.get().disownList0());
+    adopter.get().adoptList1(disowner.get().disownList1());
+    adopter.get().adoptList8(disowner.get().disownList8());
+    adopter.get().adoptList16(disowner.get().disownList16());
+    adopter.get().adoptList32(disowner.get().disownList32());
+    adopter.get().adoptList64(disowner.get().disownList64());
+    adopter.get().adoptListP(disowner.get().disownListP());
+
+    {
+      auto dst = adopter.get().initInt32ListList(3);
+      auto src = disowner.get().getInt32ListList();
+
+      auto orphan = src.disown(0);
+      checkList(orphan.getReader(), {1, 2, 3});
+      dst.adopt(0, kj::mv(orphan));
+      dst.adopt(1, src.disown(1));
+      dst.adopt(2, src.disown(2));
+    }
+
+    {
+      auto dst = adopter.get().initTextListList(3);
+      auto src = disowner.get().getTextListList();
+
+      auto orphan = src.disown(0);
+      checkList(orphan.getReader(), {"foo", "bar"});
+      dst.adopt(0, kj::mv(orphan));
+      dst.adopt(1, src.disown(1));
+      dst.adopt(2, src.disown(2));
+    }
+
+    {
+      auto dst = adopter.get().initStructListList(2);
+      auto src = disowner.get().getStructListList();
+
+      auto orphan = src.disown(0);
+      KJ_EXPECT(orphan.getReader()[0].getInt32Field() == 123);
+      KJ_EXPECT(orphan.getReader()[1].getInt32Field() == 456);
+      dst.adopt(0, kj::mv(orphan));
+      dst.adopt(1, src.disown(1));
+    }
+
+    root2.adoptLists(kj::mv(adopter));
+
+    checkTestMessage(root2);
   }
 }
 
@@ -1927,6 +1978,45 @@ TEST(Encoding, DefaultListBuilder) {
   List<TestAllTypes>::Builder(nullptr);
   List<List<int>>::Builder(nullptr);
   List<Text>::Builder(nullptr);
+}
+
+TEST(Encoding, ListSize) {
+  MallocMessageBuilder builder;
+  auto root = builder.initRoot<TestListDefaults>();
+  initTestMessage(root);
+
+  auto lists = root.asReader().getLists();
+
+  auto listSizes =
+      lists.getList0().totalSize() +
+      lists.getList1().totalSize() +
+      lists.getList8().totalSize() +
+      lists.getList16().totalSize() +
+      lists.getList32().totalSize() +
+      lists.getList64().totalSize() +
+      lists.getListP().totalSize() +
+      lists.getInt32ListList().totalSize() +
+      lists.getTextListList().totalSize() +
+      lists.getStructListList().totalSize();
+
+  auto structSize = lists.totalSize();
+
+  auto shallowSize = unbound(capnp::_::structSize<test::TestLists>().total() / WORDS);
+
+  EXPECT_EQ(structSize.wordCount - shallowSize, listSizes.wordCount);
+}
+
+KJ_TEST("list.setWithCaveats(i, list[i]) doesn't corrupt contents") {
+  MallocMessageBuilder builder;
+  auto root = builder.initRoot<TestAllTypes>();
+  auto list = root.initStructList(2);
+  initTestMessage(list[0]);
+  list.setWithCaveats(0, list[0]);
+  checkTestMessage(list[0]);
+  checkTestMessageAllZero(list[1]);
+  list.setWithCaveats(1, list[0]);
+  checkTestMessage(list[0]);
+  checkTestMessage(list[1]);
 }
 
 }  // namespace

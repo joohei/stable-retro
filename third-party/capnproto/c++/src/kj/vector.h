@@ -19,14 +19,11 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 // THE SOFTWARE.
 
-#ifndef KJ_VECTOR_H_
-#define KJ_VECTOR_H_
-
-#if defined(__GNUC__) && !KJ_HEADER_WARNINGS
-#pragma GCC system_header
-#endif
+#pragma once
 
 #include "array.h"
+
+KJ_BEGIN_HEADER
 
 namespace kj {
 
@@ -43,25 +40,27 @@ class Vector {
 public:
   inline Vector() = default;
   inline explicit Vector(size_t capacity): builder(heapArrayBuilder<T>(capacity)) {}
+  inline Vector(Array<T>&& array): builder(kj::mv(array)) {}
 
-  inline operator ArrayPtr<T>() { return builder; }
-  inline operator ArrayPtr<const T>() const { return builder; }
-  inline ArrayPtr<T> asPtr() { return builder.asPtr(); }
-  inline ArrayPtr<const T> asPtr() const { return builder.asPtr(); }
+  inline operator ArrayPtr<T>() KJ_LIFETIMEBOUND { return builder; }
+  inline operator ArrayPtr<const T>() const KJ_LIFETIMEBOUND { return builder; }
+  inline ArrayPtr<T> asPtr() KJ_LIFETIMEBOUND { return builder.asPtr(); }
+  inline ArrayPtr<const T> asPtr() const KJ_LIFETIMEBOUND { return builder.asPtr(); }
 
   inline size_t size() const { return builder.size(); }
   inline bool empty() const { return size() == 0; }
   inline size_t capacity() const { return builder.capacity(); }
-  inline T& operator[](size_t index) const { return builder[index]; }
+  inline T& operator[](size_t index) KJ_LIFETIMEBOUND { return builder[index]; }
+  inline const T& operator[](size_t index) const KJ_LIFETIMEBOUND { return builder[index]; }
 
-  inline const T* begin() const { return builder.begin(); }
-  inline const T* end() const { return builder.end(); }
-  inline const T& front() const { return builder.front(); }
-  inline const T& back() const { return builder.back(); }
-  inline T* begin() { return builder.begin(); }
-  inline T* end() { return builder.end(); }
-  inline T& front() { return builder.front(); }
-  inline T& back() { return builder.back(); }
+  inline const T* begin() const KJ_LIFETIMEBOUND { return builder.begin(); }
+  inline const T* end() const KJ_LIFETIMEBOUND { return builder.end(); }
+  inline const T& front() const KJ_LIFETIMEBOUND { return builder.front(); }
+  inline const T& back() const KJ_LIFETIMEBOUND { return builder.back(); }
+  inline T* begin() KJ_LIFETIMEBOUND { return builder.begin(); }
+  inline T* end() KJ_LIFETIMEBOUND { return builder.end(); }
+  inline T& front() KJ_LIFETIMEBOUND { return builder.front(); }
+  inline T& back() KJ_LIFETIMEBOUND { return builder.back(); }
 
   inline Array<T> releaseAsArray() {
     // TODO(perf):  Avoid a copy/move by allowing Array<T> to point to incomplete space?
@@ -71,8 +70,20 @@ public:
     return builder.finish();
   }
 
+  template <typename U>
+  inline bool operator==(const U& other) const { return asPtr() == other; }
+  template <typename U>
+  inline bool operator!=(const U& other) const { return asPtr() != other; }
+
+  inline ArrayPtr<T> slice(size_t start, size_t end) KJ_LIFETIMEBOUND {
+    return asPtr().slice(start, end);
+  }
+  inline ArrayPtr<const T> slice(size_t start, size_t end) const KJ_LIFETIMEBOUND {
+    return asPtr().slice(start, end);
+  }
+
   template <typename... Params>
-  inline T& add(Params&&... params) {
+  inline T& add(Params&&... params) KJ_LIFETIMEBOUND {
     if (builder.isFull()) grow();
     return builder.add(kj::fwd<Params>(params)...);
   }
@@ -103,9 +114,7 @@ public:
   }
 
   inline void clear() {
-    while (builder.size() > 0) {
-      builder.removeLast();
-    }
+    builder.clear();
   }
 
   inline void truncate(size_t size) {
@@ -141,4 +150,4 @@ inline auto KJ_STRINGIFY(const Vector<T>& v) -> decltype(toCharSequence(v.asPtr(
 
 }  // namespace kj
 
-#endif  // KJ_VECTOR_H_
+KJ_END_HEADER

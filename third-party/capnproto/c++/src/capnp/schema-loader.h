@@ -19,16 +19,13 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 // THE SOFTWARE.
 
-#ifndef CAPNP_SCHEMA_LOADER_H_
-#define CAPNP_SCHEMA_LOADER_H_
-
-#if defined(__GNUC__) && !defined(CAPNP_HEADER_WARNINGS)
-#pragma GCC system_header
-#endif
+#pragma once
 
 #include "schema.h"
 #include <kj/memory.h>
 #include <kj/mutex.h>
+
+CAPNP_BEGIN_HEADER
 
 namespace capnp {
 
@@ -170,4 +167,4 @@ inline void SchemaLoader::loadCompiledTypeAndDependencies() {
 
 }  // namespace capnp
 
-#endif  // CAPNP_SCHEMA_LOADER_H_
+CAPNP_END_HEADER

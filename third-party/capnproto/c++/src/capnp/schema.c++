@@ -22,8 +22,15 @@
 #include "schema.h"
 #include "message.h"
 #include <kj/debug.h>
+#include <capnp/stream.capnp.h>
 
 namespace capnp {
+
+namespace schema {
+  uint KJ_HASHCODE(Type::Which w) { return kj::hashCode(static_cast<uint16_t>(w)); }
+  // TODO(cleanup): Cap'n Proto does not declare stringifiers nor hashers for `Which` enums, unlike
+  //   all other enums. Fix that and remove this.
+}
 
 namespace _ {  // private
 
@@ -295,6 +302,11 @@ kj::StringPtr Schema::getShortDisplayName() const {
   return proto.getDisplayName().slice(proto.getDisplayNamePrefixLength());
 }
 
+const kj::StringPtr Schema::getUnqualifiedName() const {
+  auto proto = getProto();
+  return proto.getDisplayName().slice(proto.getDisplayNamePrefixLength());
+}
+
 void Schema::requireUsableAs(const _::RawSchema* expected) const {
   KJ_REQUIRE(raw->generic == expected ||
              (expected != nullptr && raw->generic->canCastTo == expected),
@@ -495,6 +507,11 @@ kj::Maybe<StructSchema::Field> StructSchema::getFieldByDiscriminant(uint16_t dis
   } else {
     return unionFields[discriminant];
   }
+}
+
+bool StructSchema::isStreamResult() const {
+  auto& streamRaw = _::rawSchema<StreamResult>();
+  return raw->generic == &streamRaw || raw->generic->canCastTo == &streamRaw;
 }
 
 Type StructSchema::Field::getType() const {
@@ -868,7 +885,7 @@ bool Type::operator==(const Type& other) const {
   KJ_UNREACHABLE;
 }
 
-size_t Type::hashCode() const {
+uint Type::hashCode() const {
   switch (baseType) {
     case schema::Type::VOID:
     case schema::Type::BOOL:
@@ -884,12 +901,24 @@ size_t Type::hashCode() const {
     case schema::Type::FLOAT64:
     case schema::Type::TEXT:
     case schema::Type::DATA:
-      return (static_cast<size_t>(baseType) << 3) + listDepth;
+      if (listDepth == 0) {
+        // Make sure that hashCode(Type(baseType)) == hashCode(baseType), otherwise HashMap lookups
+        // keyed by `Type` won't work when the caller passes `baseType` as the key.
+        return kj::hashCode(baseType);
+      } else {
+        return kj::hashCode(baseType, listDepth);
+      }
 
     case schema::Type::STRUCT:
     case schema::Type::ENUM:
     case schema::Type::INTERFACE:
-      return reinterpret_cast<size_t>(schema) + listDepth;
+      if (listDepth == 0) {
+        // Make sure that hashCode(Type(schema)) == hashCode(schema), otherwise HashMap lookups
+        // keyed by `Type` won't work when the caller passes `schema` as the key.
+        return kj::hashCode(schema);
+      } else {
+        return kj::hashCode(schema, listDepth);
+      }
 
     case schema::Type::LIST:
       KJ_UNREACHABLE;
@@ -897,9 +926,9 @@ size_t Type::hashCode() const {
     case schema::Type::ANY_POINTER: {
       // Trying to comply with strict aliasing rules. Hopefully the compiler realizes that
       // both branches compile to the same instructions and can optimize it away.
-      size_t val = scopeId != 0 || isImplicitParam ?
+      uint16_t val = scopeId != 0 || isImplicitParam ?
           paramIndex : static_cast<uint16_t>(anyPointerKind);
-      return (val << 1 | isImplicitParam) ^ scopeId;
+      return kj::hashCode(val, isImplicitParam, scopeId, listDepth);
     }
   }
 

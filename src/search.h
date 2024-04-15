@@ -3,6 +3,7 @@
 #include "memory.h"
 #include "utils.h"
 
+#include <algorithm>
 #include <vector>
 
 namespace Retro {

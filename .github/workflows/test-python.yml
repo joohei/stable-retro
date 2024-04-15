@@ -1,34 +1,155 @@
-name: Test Stable-Retro
+name: 'Test Stable-Retro'
 
-on: [pull_request, push]
+on: [pull_request, push, workflow_dispatch]
 
 permissions:
   contents: read # to fetch code (actions/checkout)
 
 jobs:
-  build:
-    runs-on: ubuntu-latest  # todo, add more OS systems to see if they work as well
+  build-linux:
+    runs-on: ubuntu-latest
+
     strategy:
       matrix:
-        python-version: ['3.8', '3.9', '3.10', '3.11', '3.12']
+        python-version: ['3.7', '3.8', '3.9', '3.10']
 
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v4
+      - name: Set up environment
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake freeglut3-dev libzip-dev
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v4
         with:
           python-version: ${{ matrix.python-version }}
 
-      - name: Install system packages
+      - name: Install packages
         run: |
-          sudo apt-get update
-          sudo apt-get install git cmake capnproto zlib1g-dev build-essential pkg-config libzip-dev software-properties-common libbz2-dev xvfb python3-opengl
+          python -m pip install -U pip
+          pip install -U setuptools wheel pytest
+          pip install -e .
 
-      - name: Install pip packages
-        run: |
-          python3 -m pip install --upgrade pip pytest
-          python3 -m pip install -e .
+      - name: Set up headless display
+        uses: pyvista/setup-headless-display-action@v1
 
       - name: Run tests
+        run: python -m pytest
+
+  build-windows:
+    runs-on: windows-latest
+
+    strategy:
+      matrix:
+        python-version: ['3.9', '3.10']
+        msystem: ['UCRT64', 'MINGW64']
+        include:
+          - python-version: '3.9'
+            branch: 'mingw-v3.9.13'
+          - python-version: '3.10'
+            branch: 'mingw-v3.10.12'
+          - msystem: UCRT64
+            prefix: mingw-w64-ucrt-x86_64
+          - msystem: MINGW64
+            prefix: mingw-w64-x86_64
+
+    defaults:
+      run:
+        shell: msys2 {0}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up environment
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: ${{ matrix.msystem }}
+          update: true
+          install: >-
+            autoconf-archive
+            git
+            ${{ matrix.prefix }}-autotools
+            ${{ matrix.prefix }}-cmake
+            ${{ matrix.prefix }}-freeglut
+            ${{ matrix.prefix }}-gcc
+            ${{ matrix.prefix }}-libffi
+            ${{ matrix.prefix }}-libzip
+            ${{ matrix.prefix }}-make
+            ${{ matrix.prefix }}-mpdecimal
+            ${{ matrix.prefix }}-ncurses
+            ${{ matrix.prefix }}-openblas
+            ${{ matrix.prefix }}-sqlite3
+            ${{ matrix.prefix }}-tcl
+            ${{ matrix.prefix }}-tk
+            ${{ matrix.prefix }}-tzdata
+
+      - name: Set up Python ${{ matrix.python-version }}
         run: |
-          xvfb-run -s '-screen 0 1024x768x24' pytest
+          git clone -b ${{ matrix.branch }} https://github.com/msys2-contrib/cpython-mingw
+          cd cpython-mingw
+          autoreconf -fi
+          ./configure \
+            --enable-shared \
+            --enable-optimizations \
+            --with-ensurepip=no \
+            --with-system-expat \
+            --with-system-ffi \
+            --with-system-libmpdec \
+            --with-tzpath=${MINGW_PREFIX}/share/zoneinfo
+          make -j$(nproc)
+          make install DESTDIR=tmp
+          cp -rf tmp/* /
+          python3 -m ensurepip
+
+      - name: Clean up
+        run: |
+          rm -rf cpython-mingw
+
+      - name: Install packages
+        run: |
+          export SETUPTOOLS_USE_DISTUTILS=stdlib
+          python3 -m pip install -U pip
+          pip install -U setuptools wheel pytest numpy==1.25.2
+          pip install -e .
+
+      - name: Set up headless display
+        uses: pyvista/setup-headless-display-action@v1
+
+      - name: Run tests
+        run: python3 -m pytest
+
+  build-macos:
+    runs-on: macos-latest
+
+    strategy:
+      matrix:
+        python-version: ['3.7', '3.8', '3.9', '3.10']
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up environment
+        run: |
+          brew update
+          brew install cmake libzip
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v2
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install packages
+        run: |
+          export MACOSX_DEPLOYMENT_TARGET=10.9
+          export SDKROOT=$(xcrun --sdk macosx --show-sdk-path)
+          python -m pip install -U pip
+          pip install -U setuptools wheel pytest
+          pip install -e .
+
+      - name: Set up headless display
+        uses: pyvista/setup-headless-display-action@v1
+
+      - name: Run tests
+        run: python -m pytest

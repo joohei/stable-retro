@@ -22,15 +22,32 @@
 // This file contains a bunch of internal declarations that must appear before async.h can start.
 // We don't define these directly in async.h because it makes the file hard to read.
 
-#ifndef KJ_ASYNC_PRELUDE_H_
-#define KJ_ASYNC_PRELUDE_H_
-
-#if defined(__GNUC__) && !KJ_HEADER_WARNINGS
-#pragma GCC system_header
-#endif
+#pragma once
 
 #include "exception.h"
 #include "tuple.h"
+#include "source-location.h"
+
+// Detect whether or not we should enable kj::Promise<T> coroutine integration.
+//
+// TODO(someday): Support coroutines with -fno-exceptions.
+#if !KJ_NO_EXCEPTIONS
+#ifdef __has_include
+#if (__cpp_impl_coroutine >= 201902L) && __has_include(<coroutine>)
+// C++20 Coroutines detected.
+#include <coroutine>
+#define KJ_HAS_COROUTINE 1
+#define KJ_COROUTINE_STD_NAMESPACE std
+#elif (__cpp_coroutines >= 201703L) && __has_include(<experimental/coroutine>)
+// Coroutines TS detected.
+#include <experimental/coroutine>
+#define KJ_HAS_COROUTINE 1
+#define KJ_COROUTINE_STD_NAMESPACE std::experimental
+#endif
+#endif
+#endif
+
+KJ_BEGIN_HEADER
 
 namespace kj {
 
@@ -38,22 +55,41 @@ class EventLoop;
 template <typename T>
 class Promise;
 class WaitScope;
+class TaskSet;
 
-template <typename T>
-Promise<Array<T>> joinPromises(Array<Promise<T>>&& promises);
-Promise<void> joinPromises(Array<Promise<void>>&& promises);
+Promise<void> joinPromises(Array<Promise<void>>&& promises, SourceLocation location = {});
+// Out-of-line <void> specialization of template function defined in async.h.
 
 namespace _ {  // private
 
-template <typename T> struct JoinPromises_ { typedef T Type; };
-template <typename T> struct JoinPromises_<Promise<T>> { typedef T Type; };
+template <typename T>
+Promise<T> chainPromiseType(T*);
+template <typename T>
+Promise<T> chainPromiseType(Promise<T>*);
 
 template <typename T>
-using JoinPromises = typename JoinPromises_<T>::Type;
-// If T is Promise<U>, resolves to U, otherwise resolves to T.
-//
-// TODO(cleanup):  Rename to avoid confusion with joinPromises() call which is completely
-//   unrelated.
+using ChainPromises = decltype(chainPromiseType((T*)nullptr));
+// Constructs a promise for T, reducing double-promises. That is, if T is Promise<U>, resolves to
+// Promise<U>, otherwise resolves to Promise<T>.
+
+template <typename T>
+Promise<T> reducePromiseType(T*, ...);
+template <typename T>
+Promise<T> reducePromiseType(Promise<T>*, ...);
+template <typename T, typename Reduced = decltype(T::reducePromise(kj::instance<Promise<T>>()))>
+Reduced reducePromiseType(T*, bool);
+
+template <typename T>
+using ReducePromises = decltype(reducePromiseType((T*)nullptr, false));
+// Like ChainPromises, but also takes into account whether T has a method `reducePromise` that
+// reduces Promise<T> to something else. In particular this allows Promise<capnp::RemotePromise<U>>
+// to reduce to capnp::RemotePromise<U>.
+
+template <typename T> struct UnwrapPromise_;
+template <typename T> struct UnwrapPromise_<Promise<T>> { typedef T Type; };
+
+template <typename T>
+using UnwrapPromise = typename UnwrapPromise_<T>::Type;
 
 class PropagateException {
   // A functor which accepts a kj::Exception as a parameter and returns a broken promise of
@@ -90,7 +126,7 @@ using ReturnType = typename ReturnType_<Func, T>::Type;
 template <typename T> struct SplitTuplePromise_ { typedef Promise<T> Type; };
 template <typename... T>
 struct SplitTuplePromise_<kj::_::Tuple<T...>> {
-  typedef kj::Tuple<Promise<JoinPromises<T>>...> Type;
+  typedef kj::Tuple<ReducePromises<T>...> Type;
 };
 
 template <typename T>
@@ -171,10 +207,12 @@ class PromiseNode;
 class ChainPromiseNode;
 template <typename T>
 class ForkHub;
-
-class TaskSetImpl;
+class FiberStack;
+class FiberBase;
 
 class Event;
+class XThreadEvent;
+class XThreadPaf;
 
 class PromiseBase {
 public:
@@ -187,32 +225,28 @@ private:
   PromiseBase() = default;
   PromiseBase(Own<PromiseNode>&& node): node(kj::mv(node)) {}
 
-  friend class kj::EventLoop;
-  friend class ChainPromiseNode;
   template <typename>
   friend class kj::Promise;
-  friend class TaskSetImpl;
-  template <typename U>
-  friend Promise<Array<U>> kj::joinPromises(Array<Promise<U>>&& promises);
-  friend Promise<void> kj::joinPromises(Array<Promise<void>>&& promises);
+  friend class PromiseNode;
 };
 
 void detach(kj::Promise<void>&& promise);
-void waitImpl(Own<_::PromiseNode>&& node, _::ExceptionOrValue& result, WaitScope& waitScope);
+void waitImpl(Own<_::PromiseNode>&& node, _::ExceptionOrValue& result, WaitScope& waitScope,
+              SourceLocation location);
+bool pollImpl(_::PromiseNode& node, WaitScope& waitScope, SourceLocation location);
 Promise<void> yield();
+Promise<void> yieldHarder();
 Own<PromiseNode> neverDone();
 
 class NeverDone {
 public:
   template <typename T>
-  operator Promise<T>() const {
-    return Promise<T>(false, neverDone());
-  }
+  operator Promise<T>() const;
 
-  KJ_NORETURN(void wait(WaitScope& waitScope) const);
+  KJ_NORETURN(void wait(WaitScope& waitScope, SourceLocation location = {}) const);
 };
 
 }  // namespace _ (private)
 }  // namespace kj
 
-#endif  // KJ_ASYNC_PRELUDE_H_
+KJ_END_HEADER

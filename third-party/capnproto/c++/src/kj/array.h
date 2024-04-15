@@ -19,16 +19,13 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 // THE SOFTWARE.
 
-#ifndef KJ_ARRAY_H_
-#define KJ_ARRAY_H_
+#pragma once
 
-#if defined(__GNUC__) && !KJ_HEADER_WARNINGS
-#pragma GCC system_header
-#endif
-
-#include "common.h"
+#include "memory.h"
 #include <string.h>
 #include <initializer_list>
+
+KJ_BEGIN_HEADER
 
 namespace kj {
 
@@ -143,53 +140,62 @@ public:
     other.ptr = nullptr;
     other.size_ = 0;
   }
-  inline Array(T* firstElement, size_t size, const ArrayDisposer& disposer)
+  inline Array(T* firstElement KJ_LIFETIMEBOUND, size_t size, const ArrayDisposer& disposer)
       : ptr(firstElement), size_(size), disposer(&disposer) {}
 
   KJ_DISALLOW_COPY(Array);
   inline ~Array() noexcept { dispose(); }
 
-  inline operator ArrayPtr<T>() {
+  inline operator ArrayPtr<T>() KJ_LIFETIMEBOUND {
     return ArrayPtr<T>(ptr, size_);
   }
-  inline operator ArrayPtr<const T>() const {
+  inline operator ArrayPtr<const T>() const KJ_LIFETIMEBOUND {
     return ArrayPtr<T>(ptr, size_);
   }
-  inline ArrayPtr<T> asPtr() {
+  inline ArrayPtr<T> asPtr() KJ_LIFETIMEBOUND {
     return ArrayPtr<T>(ptr, size_);
   }
-  inline ArrayPtr<const T> asPtr() const {
+  inline ArrayPtr<const T> asPtr() const KJ_LIFETIMEBOUND {
     return ArrayPtr<T>(ptr, size_);
   }
 
   inline size_t size() const { return size_; }
-  inline T& operator[](size_t index) const {
+  inline T& operator[](size_t index) KJ_LIFETIMEBOUND {
+    KJ_IREQUIRE(index < size_, "Out-of-bounds Array access.");
+    return ptr[index];
+  }
+  inline const T& operator[](size_t index) const KJ_LIFETIMEBOUND {
     KJ_IREQUIRE(index < size_, "Out-of-bounds Array access.");
     return ptr[index];
   }
 
-  inline const T* begin() const { return ptr; }
-  inline const T* end() const { return ptr + size_; }
-  inline const T& front() const { return *ptr; }
-  inline const T& back() const { return *(ptr + size_ - 1); }
-  inline T* begin() { return ptr; }
-  inline T* end() { return ptr + size_; }
-  inline T& front() { return *ptr; }
-  inline T& back() { return *(ptr + size_ - 1); }
+  inline const T* begin() const KJ_LIFETIMEBOUND { return ptr; }
+  inline const T* end() const KJ_LIFETIMEBOUND { return ptr + size_; }
+  inline const T& front() const KJ_LIFETIMEBOUND { return *ptr; }
+  inline const T& back() const KJ_LIFETIMEBOUND { return *(ptr + size_ - 1); }
+  inline T* begin() KJ_LIFETIMEBOUND { return ptr; }
+  inline T* end() KJ_LIFETIMEBOUND { return ptr + size_; }
+  inline T& front() KJ_LIFETIMEBOUND { return *ptr; }
+  inline T& back() KJ_LIFETIMEBOUND { return *(ptr + size_ - 1); }
 
-  inline ArrayPtr<T> slice(size_t start, size_t end) {
+  template <typename U>
+  inline bool operator==(const U& other) const { return asPtr() == other; }
+  template <typename U>
+  inline bool operator!=(const U& other) const { return asPtr() != other; }
+
+  inline ArrayPtr<T> slice(size_t start, size_t end) KJ_LIFETIMEBOUND {
     KJ_IREQUIRE(start <= end && end <= size_, "Out-of-bounds Array::slice().");
     return ArrayPtr<T>(ptr + start, end - start);
   }
-  inline ArrayPtr<const T> slice(size_t start, size_t end) const {
+  inline ArrayPtr<const T> slice(size_t start, size_t end) const KJ_LIFETIMEBOUND {
     KJ_IREQUIRE(start <= end && end <= size_, "Out-of-bounds Array::slice().");
     return ArrayPtr<const T>(ptr + start, end - start);
   }
 
-  inline ArrayPtr<const byte> asBytes() const { return asPtr().asBytes(); }
-  inline ArrayPtr<PropagateConst<T, byte>> asBytes() { return asPtr().asBytes(); }
-  inline ArrayPtr<const char> asChars() const { return asPtr().asChars(); }
-  inline ArrayPtr<PropagateConst<T, char>> asChars() { return asPtr().asChars(); }
+  inline ArrayPtr<const byte> asBytes() const KJ_LIFETIMEBOUND { return asPtr().asBytes(); }
+  inline ArrayPtr<PropagateConst<T, byte>> asBytes() KJ_LIFETIMEBOUND { return asPtr().asBytes(); }
+  inline ArrayPtr<const char> asChars() const KJ_LIFETIMEBOUND { return asPtr().asChars(); }
+  inline ArrayPtr<PropagateConst<T, char>> asChars() KJ_LIFETIMEBOUND { return asPtr().asChars(); }
 
   inline Array<PropagateConst<T, byte>> releaseAsBytes() {
     // Like asBytes() but transfers ownership.
@@ -230,6 +236,10 @@ public:
     return *this;
   }
 
+  template <typename... Attachments>
+  Array<T> attach(Attachments&&... attachments) KJ_WARN_UNUSED_RESULT;
+  // Like Own<T>::attach(), but attaches to an Array.
+
 private:
   T* ptr;
   size_t size_;
@@ -249,6 +259,8 @@ private:
 
   template <typename U>
   friend class Array;
+  template <typename U>
+  friend class ArrayBuilder;
 };
 
 static_assert(!canMemcpy<Array<char>>(), "canMemcpy<>() is broken");
@@ -321,37 +333,48 @@ public:
     other.pos = nullptr;
     other.endPtr = nullptr;
   }
+  ArrayBuilder(Array<T>&& other)
+      : ptr(other.ptr), pos(other.ptr + other.size_), endPtr(pos), disposer(other.disposer) {
+    // Create an already-full ArrayBuilder from an Array of the same type. This constructor
+    // primarily exists to enable Vector<T> to be constructed from Array<T>.
+    other.ptr = nullptr;
+    other.size_ = 0;
+  }
   KJ_DISALLOW_COPY(ArrayBuilder);
   inline ~ArrayBuilder() noexcept(false) { dispose(); }
 
-  inline operator ArrayPtr<T>() {
+  inline operator ArrayPtr<T>() KJ_LIFETIMEBOUND {
     return arrayPtr(ptr, pos);
   }
-  inline operator ArrayPtr<const T>() const {
+  inline operator ArrayPtr<const T>() const KJ_LIFETIMEBOUND {
     return arrayPtr(ptr, pos);
   }
-  inline ArrayPtr<T> asPtr() {
+  inline ArrayPtr<T> asPtr() KJ_LIFETIMEBOUND {
     return arrayPtr(ptr, pos);
   }
-  inline ArrayPtr<const T> asPtr() const {
+  inline ArrayPtr<const T> asPtr() const KJ_LIFETIMEBOUND {
     return arrayPtr(ptr, pos);
   }
 
   inline size_t size() const { return pos - ptr; }
   inline size_t capacity() const { return endPtr - ptr; }
-  inline T& operator[](size_t index) const {
+  inline T& operator[](size_t index) KJ_LIFETIMEBOUND {
+    KJ_IREQUIRE(index < implicitCast<size_t>(pos - ptr), "Out-of-bounds Array access.");
+    return ptr[index];
+  }
+  inline const T& operator[](size_t index) const KJ_LIFETIMEBOUND {
     KJ_IREQUIRE(index < implicitCast<size_t>(pos - ptr), "Out-of-bounds Array access.");
     return ptr[index];
   }
 
-  inline const T* begin() const { return ptr; }
-  inline const T* end() const { return pos; }
-  inline const T& front() const { return *ptr; }
-  inline const T& back() const { return *(pos - 1); }
-  inline T* begin() { return ptr; }
-  inline T* end() { return pos; }
-  inline T& front() { return *ptr; }
-  inline T& back() { return *(pos - 1); }
+  inline const T* begin() const KJ_LIFETIMEBOUND { return ptr; }
+  inline const T* end() const KJ_LIFETIMEBOUND { return pos; }
+  inline const T& front() const KJ_LIFETIMEBOUND { return *ptr; }
+  inline const T& back() const KJ_LIFETIMEBOUND { return *(pos - 1); }
+  inline T* begin() KJ_LIFETIMEBOUND { return ptr; }
+  inline T* end() KJ_LIFETIMEBOUND { return pos; }
+  inline T& front() KJ_LIFETIMEBOUND { return *ptr; }
+  inline T& back() KJ_LIFETIMEBOUND { return *(pos - 1); }
 
   ArrayBuilder& operator=(ArrayBuilder&& other) {
     dispose();
@@ -370,7 +393,7 @@ public:
   }
 
   template <typename... Params>
-  T& add(Params&&... params) {
+  T& add(Params&&... params) KJ_LIFETIMEBOUND {
     KJ_IREQUIRE(pos < endPtr, "Added too many elements to ArrayBuilder.");
     ctor(*pos, kj::fwd<Params>(params)...);
     return *pos++;
@@ -403,6 +426,16 @@ public:
     }
   }
 
+  void clear() {
+    if (__has_trivial_destructor(T)) {
+      pos = ptr;
+    } else {
+      while (pos > ptr) {
+        kj::dtor(*--pos);
+      }
+    }
+  }
+
   void resize(size_t size) {
     KJ_IREQUIRE(size <= capacity(), "can't resize past capacity");
 
@@ -430,7 +463,7 @@ public:
 
   Array<T> finish() {
     // We could safely remove this check if we assume that the disposer implementation doesn't
-    // need to know the original capacity, as is thes case with HeapArrayDisposer since it uses
+    // need to know the original capacity, as is the case with HeapArrayDisposer since it uses
     // operator new() or if we created a custom disposer for ArrayBuilder which stores the capacity
     // in a prefix.  But that would make it hard to write cleverer heap allocators, and anyway this
     // check might catch bugs.  Probably people should use Vector if they want to build arrays
@@ -451,7 +484,7 @@ private:
   T* ptr;
   RemoveConst<T>* pos;
   T* endPtr;
-  const ArrayDisposer* disposer;
+  const ArrayDisposer* disposer = &NullArrayDisposer::instance;
 
   inline void dispose() {
     // Make sure that if an exception is thrown, we are left with a null ptr, so we won't possibly
@@ -485,21 +518,23 @@ class FixedArray {
   // A fixed-width array whose storage is allocated inline rather than on the heap.
 
 public:
-  inline size_t size() const { return fixedSize; }
-  inline T* begin() { return content; }
-  inline T* end() { return content + fixedSize; }
-  inline const T* begin() const { return content; }
-  inline const T* end() const { return content + fixedSize; }
+  inline constexpr size_t size() const { return fixedSize; }
+  inline constexpr T* begin() KJ_LIFETIMEBOUND { return content; }
+  inline constexpr T* end() KJ_LIFETIMEBOUND { return content + fixedSize; }
+  inline constexpr const T* begin() const KJ_LIFETIMEBOUND { return content; }
+  inline constexpr const T* end() const KJ_LIFETIMEBOUND { return content + fixedSize; }
 
-  inline operator ArrayPtr<T>() {
+  inline constexpr operator ArrayPtr<T>() KJ_LIFETIMEBOUND {
     return arrayPtr(content, fixedSize);
   }
-  inline operator ArrayPtr<const T>() const {
+  inline constexpr operator ArrayPtr<const T>() const KJ_LIFETIMEBOUND {
     return arrayPtr(content, fixedSize);
   }
 
-  inline T& operator[](size_t index) { return content[index]; }
-  inline const T& operator[](size_t index) const { return content[index]; }
+  inline constexpr T& operator[](size_t index) KJ_LIFETIMEBOUND { return content[index]; }
+  inline constexpr const T& operator[](size_t index) const KJ_LIFETIMEBOUND {
+    return content[index];
+  }
 
 private:
   T content[fixedSize];
@@ -518,20 +553,20 @@ public:
 
   inline size_t size() const { return currentSize; }
   inline void setSize(size_t s) { KJ_IREQUIRE(s <= fixedSize); currentSize = s; }
-  inline T* begin() { return content; }
-  inline T* end() { return content + currentSize; }
-  inline const T* begin() const { return content; }
-  inline const T* end() const { return content + currentSize; }
+  inline T* begin() KJ_LIFETIMEBOUND { return content; }
+  inline T* end() KJ_LIFETIMEBOUND { return content + currentSize; }
+  inline const T* begin() const KJ_LIFETIMEBOUND { return content; }
+  inline const T* end() const KJ_LIFETIMEBOUND { return content + currentSize; }
 
-  inline operator ArrayPtr<T>() {
+  inline operator ArrayPtr<T>() KJ_LIFETIMEBOUND {
     return arrayPtr(content, currentSize);
   }
-  inline operator ArrayPtr<const T>() const {
+  inline operator ArrayPtr<const T>() const KJ_LIFETIMEBOUND {
     return arrayPtr(content, currentSize);
   }
 
-  inline T& operator[](size_t index) { return content[index]; }
-  inline const T& operator[](size_t index) const { return content[index]; }
+  inline T& operator[](size_t index) KJ_LIFETIMEBOUND { return content[index]; }
+  inline const T& operator[](size_t index) const KJ_LIFETIMEBOUND { return content[index]; }
 
 private:
   size_t currentSize;
@@ -604,7 +639,8 @@ struct ArrayDisposer::Dispose_<T, false> {
 
   static void dispose(T* firstElement, size_t elementCount, size_t capacity,
                       const ArrayDisposer& disposer) {
-    disposer.disposeImpl(firstElement, sizeof(T), elementCount, capacity, &destruct);
+    disposer.disposeImpl(const_cast<RemoveConst<T>*>(firstElement),
+                         sizeof(T), elementCount, capacity, &destruct);
   }
 };
 
@@ -662,7 +698,9 @@ struct CopyConstructArray_;
 template <typename T, bool move>
 struct CopyConstructArray_<T, T*, move, true> {
   static inline T* apply(T* __restrict__ pos, T* start, T* end) {
-    memcpy(pos, start, reinterpret_cast<byte*>(end) - reinterpret_cast<byte*>(start));
+    if (end != start) {
+      memcpy(pos, start, reinterpret_cast<byte*>(end) - reinterpret_cast<byte*>(start));
+    }
     return pos + (end - start);
   }
 };
@@ -670,7 +708,9 @@ struct CopyConstructArray_<T, T*, move, true> {
 template <typename T>
 struct CopyConstructArray_<T, const T*, false, true> {
   static inline T* apply(T* __restrict__ pos, const T* start, const T* end) {
-    memcpy(pos, start, reinterpret_cast<const byte*>(end) - reinterpret_cast<const byte*>(start));
+    if (end != start) {
+      memcpy(pos, start, reinterpret_cast<const byte*>(end) - reinterpret_cast<const byte*>(start));
+    }
     return pos + (end - start);
   }
 };
@@ -808,6 +848,66 @@ inline Array<T> heapArray(std::initializer_list<T> init) {
   return heapArray<T>(init.begin(), init.end());
 }
 
+#if __cplusplus > 201402L
+template <typename T, typename... Params>
+inline Array<Decay<T>> arr(T&& param1, Params&&... params) {
+  ArrayBuilder<Decay<T>> builder = heapArrayBuilder<Decay<T>>(sizeof...(params) + 1);
+  (builder.add(kj::fwd<T>(param1)), ... , builder.add(kj::fwd<Params>(params)));
+  return builder.finish();
+}
+template <typename T, typename... Params>
+inline Array<Decay<T>> arrOf(Params&&... params) {
+  ArrayBuilder<Decay<T>> builder = heapArrayBuilder<Decay<T>>(sizeof...(params));
+  (... , builder.add(kj::fwd<Params>(params)));
+  return builder.finish();
+}
+#endif
+
+namespace _ {  // private
+
+template <typename... T>
+struct ArrayDisposableOwnedBundle final: public ArrayDisposer, public OwnedBundle<T...> {
+  ArrayDisposableOwnedBundle(T&&... values): OwnedBundle<T...>(kj::fwd<T>(values)...) {}
+  void disposeImpl(void*, size_t, size_t, size_t, void (*)(void*)) const override { delete this; }
+};
+
+}  // namespace _ (private)
+
+template <typename T>
+template <typename... Attachments>
+Array<T> Array<T>::attach(Attachments&&... attachments) {
+  T* ptrCopy = ptr;
+  auto sizeCopy = size_;
+
+  KJ_IREQUIRE(ptrCopy != nullptr, "cannot attach to null pointer");
+
+  // HACK: If someone accidentally calls .attach() on a null pointer in opt mode, try our best to
+  //   accomplish reasonable behavior: We turn the pointer non-null but still invalid, so that the
+  //   disposer will still be called when the pointer goes out of scope.
+  if (ptrCopy == nullptr) ptrCopy = reinterpret_cast<T*>(1);
+
+  auto bundle = new _::ArrayDisposableOwnedBundle<Array<T>, Attachments...>(
+      kj::mv(*this), kj::fwd<Attachments>(attachments)...);
+  return Array<T>(ptrCopy, sizeCopy, *bundle);
+}
+
+template <typename T>
+template <typename... Attachments>
+Array<T> ArrayPtr<T>::attach(Attachments&&... attachments) const {
+  T* ptrCopy = ptr;
+
+  KJ_IREQUIRE(ptrCopy != nullptr, "cannot attach to null pointer");
+
+  // HACK: If someone accidentally calls .attach() on a null pointer in opt mode, try our best to
+  //   accomplish reasonable behavior: We turn the pointer non-null but still invalid, so that the
+  //   disposer will still be called when the pointer goes out of scope.
+  if (ptrCopy == nullptr) ptrCopy = reinterpret_cast<T*>(1);
+
+  auto bundle = new _::ArrayDisposableOwnedBundle<Attachments...>(
+      kj::fwd<Attachments>(attachments)...);
+  return Array<T>(ptrCopy, size_, *bundle);
+}
+
 }  // namespace kj
 
-#endif  // KJ_ARRAY_H_
+KJ_END_HEADER

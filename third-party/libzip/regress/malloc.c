@@ -1,6 +1,6 @@
 /*
   malloc.c -- override *alloc() to allow testing special cases
-  Copyright (C) 2015-2016 Dieter Baron and Thomas Klausner
+  Copyright (C) 2015-2021 Dieter Baron and Thomas Klausner
 
   This file is part of ckmame, a program to check rom sets for MAME.
   The authors can be contacted at <ckmame@nih.at>
@@ -42,7 +42,7 @@
 #include "config.h"
 
 #if !defined(RTLD_NEXT)
-#define RTLD_NEXT	RTLD_DEFAULT
+#define RTLD_NEXT RTLD_DEFAULT
 #endif
 
 #if defined(HAVE___PROGNAME)
@@ -53,8 +53,7 @@ extern char *__progname;
 /* all fine */
 #else
 const char *
-getprogname(void)
-{
+getprogname(void) {
 #if defined(HAVE___PROGNAME)
     return __progname;
 #else
@@ -78,40 +77,38 @@ static const char *myname = NULL;
 /* TODO: optionally, catch malloc of particular size */
 
 static void
-init(void)
-{
+init(void) {
     char *foo;
     myname = getprogname();
     if (!myname)
-	myname = "(unknown)";
-    if ((foo=getenv("MALLOC_MAX_COUNT")) != NULL)
-	max_count = strtoul(foo, NULL, 0);
-    if ((foo=getenv("MALLOC_MIN_SIZE")) != NULL)
-	min_size = strtoul(foo, NULL, 0);
+        myname = "(unknown)";
+    if ((foo = getenv("MALLOC_MAX_COUNT")) != NULL)
+        max_count = strtoul(foo, NULL, 0);
+    if ((foo = getenv("MALLOC_MIN_SIZE")) != NULL)
+        min_size = strtoul(foo, NULL, 0);
     real_calloc = dlsym(RTLD_NEXT, "calloc");
     if (!real_calloc)
-	abort();
+        abort();
     real_malloc = dlsym(RTLD_NEXT, "malloc");
     if (!real_malloc)
-	abort();
+        abort();
     real_realloc = dlsym(RTLD_NEXT, "realloc");
     if (!real_realloc)
-	abort();
+        abort();
     inited = 1;
 }
 
 void *
-calloc(size_t number, size_t size)
-{
+calloc(size_t number, size_t size) {
     void *ret;
 
     if (!inited) {
-	init();
+        init();
     }
 
-    if (number >= min_size/size && count >= max_count) {
-	errno = ENOMEM;
-	return NULL;
+    if (number >= min_size / size && count >= max_count) {
+        errno = ENOMEM;
+        return NULL;
     }
 
     ret = real_calloc(number, size);
@@ -123,17 +120,16 @@ calloc(size_t number, size_t size)
 }
 
 void *
-malloc(size_t size)
-{
+malloc(size_t size) {
     void *ret;
 
     if (!inited) {
-	init();
+        init();
     }
 
     if (size >= min_size && count >= max_count) {
-	errno = ENOMEM;
-	return NULL;
+        errno = ENOMEM;
+        return NULL;
     }
 
     ret = real_malloc(size);
@@ -145,17 +141,16 @@ malloc(size_t size)
 }
 
 void *
-realloc(void *ptr, size_t size)
-{
+realloc(void *ptr, size_t size) {
     void *ret;
 
     if (!inited) {
-	init();
+        init();
     }
 
     if (size >= min_size && count >= max_count) {
-	errno = ENOMEM;
-	return NULL;
+        errno = ENOMEM;
+        return NULL;
     }
 
     ret = real_realloc(ptr, size);

@@ -31,6 +31,9 @@ TEST(OneOf, Basic) {
   EXPECT_FALSE(var.is<int>());
   EXPECT_FALSE(var.is<float>());
   EXPECT_FALSE(var.is<String>());
+  EXPECT_TRUE(var.tryGet<int>() == nullptr);
+  EXPECT_TRUE(var.tryGet<float>() == nullptr);
+  EXPECT_TRUE(var.tryGet<String>() == nullptr);
 
   var.init<int>(123);
 
@@ -44,6 +47,10 @@ TEST(OneOf, Basic) {
   EXPECT_ANY_THROW(var.get<String>());
 #endif
 
+  EXPECT_EQ(123, KJ_ASSERT_NONNULL(var.tryGet<int>()));
+  EXPECT_TRUE(var.tryGet<float>() == nullptr);
+  EXPECT_TRUE(var.tryGet<String>() == nullptr);
+
   var.init<String>(kj::str("foo"));
 
   EXPECT_FALSE(var.is<int>());
@@ -52,6 +59,10 @@ TEST(OneOf, Basic) {
 
   EXPECT_EQ("foo", var.get<String>());
 
+  EXPECT_TRUE(var.tryGet<int>() == nullptr);
+  EXPECT_TRUE(var.tryGet<float>() == nullptr);
+  EXPECT_EQ("foo", KJ_ASSERT_NONNULL(var.tryGet<String>()));
+
   OneOf<int, float, String> var2 = kj::mv(var);
   EXPECT_EQ("", var.get<String>());
   EXPECT_EQ("foo", var2.get<String>());
@@ -59,6 +70,11 @@ TEST(OneOf, Basic) {
   var = kj::mv(var2);
   EXPECT_EQ("foo", var.get<String>());
   EXPECT_EQ("", var2.get<String>());
+
+  auto canCompile KJ_UNUSED = [&]() {
+    var.allHandled<3>();
+    // var.allHandled<2>();  // doesn't compile
+  };
 }
 
 TEST(OneOf, Copy) {
@@ -80,6 +96,118 @@ TEST(OneOf, Copy) {
   var2 = var;
   EXPECT_TRUE(var2.is<const char*>());
   EXPECT_STREQ("foo", var2.get<const char*>());
+}
+
+TEST(OneOf, Switch) {
+  OneOf<int, float, const char*> var;
+  var = "foo";
+  uint count = 0;
+
+  {
+    KJ_SWITCH_ONEOF(var) {
+      KJ_CASE_ONEOF(i, int) {
+        KJ_FAIL_ASSERT("expected char*, got int", i);
+      }
+      KJ_CASE_ONEOF(s, const char*) {
+        KJ_EXPECT(kj::StringPtr(s) == "foo");
+        ++count;
+      }
+      KJ_CASE_ONEOF(n, float) {
+        KJ_FAIL_ASSERT("expected char*, got float", n);
+      }
+    }
+  }
+
+  KJ_EXPECT(count == 1);
+
+  {
+    KJ_SWITCH_ONEOF(kj::cp(var)) {
+      KJ_CASE_ONEOF(i, int) {
+        KJ_FAIL_ASSERT("expected char*, got int", i);
+      }
+      KJ_CASE_ONEOF(s, const char*) {
+        KJ_EXPECT(kj::StringPtr(s) == "foo");
+      }
+      KJ_CASE_ONEOF(n, float) {
+        KJ_FAIL_ASSERT("expected char*, got float", n);
+      }
+    }
+  }
+
+  {
+    // At one time this failed to compile.
+    const auto& constVar = var;
+    KJ_SWITCH_ONEOF(constVar) {
+      KJ_CASE_ONEOF(i, int) {
+        KJ_FAIL_ASSERT("expected char*, got int", i);
+      }
+      KJ_CASE_ONEOF(s, const char*) {
+        KJ_EXPECT(kj::StringPtr(s) == "foo");
+      }
+      KJ_CASE_ONEOF(n, float) {
+        KJ_FAIL_ASSERT("expected char*, got float", n);
+      }
+    }
+  }
+}
+
+TEST(OneOf, Maybe) {
+  Maybe<OneOf<int, float>> var;
+  var = OneOf<int, float>(123);
+
+  KJ_IF_MAYBE(v, var) {
+    // At one time this failed to compile. Note that a Maybe<OneOf<...>> isn't necessarily great
+    // style -- you might be better off with an explicit OneOf<Empty, ...>. Nevertheless, it should
+    // compile.
+    KJ_SWITCH_ONEOF(*v) {
+      KJ_CASE_ONEOF(i, int) {
+        KJ_EXPECT(i == 123);
+      }
+      KJ_CASE_ONEOF(n, float) {
+        KJ_FAIL_ASSERT("expected int, got float", n);
+      }
+    }
+  }
+}
+
+KJ_TEST("OneOf copy/move from alternative variants") {
+  {
+    // Test const copy.
+    const OneOf<int, float> src = 23.5f;
+    OneOf<int, bool, float> dst = src;
+    KJ_ASSERT(dst.is<float>());
+    KJ_EXPECT(dst.get<float>() == 23.5);
+  }
+
+  {
+    // Test case that requires non-const copy.
+    int arr[3] = {1, 2, 3};
+    OneOf<int, ArrayPtr<int>> src = ArrayPtr<int>(arr);
+    OneOf<int, bool, ArrayPtr<int>> dst = src;
+    KJ_ASSERT(dst.is<ArrayPtr<int>>());
+    KJ_EXPECT(dst.get<ArrayPtr<int>>().begin() == arr);
+    KJ_EXPECT(dst.get<ArrayPtr<int>>().size() == kj::size(arr));
+  }
+
+  {
+    // Test move.
+    OneOf<int, String> src = kj::str("foo");
+    OneOf<int, bool, String> dst = kj::mv(src);
+    KJ_ASSERT(dst.is<String>());
+    KJ_EXPECT(dst.get<String>() == "foo");
+
+    String s = kj::mv(dst).get<String>();
+    KJ_EXPECT(s == "foo");
+  }
+
+  {
+    // We can still have nested OneOfs.
+    OneOf<int, float> src = 23.5f;
+    OneOf<bool, OneOf<int, float>> dst = src;
+    KJ_ASSERT((dst.is<OneOf<int, float>>()));
+    KJ_ASSERT((dst.get<OneOf<int, float>>().is<float>()));
+    KJ_EXPECT((dst.get<OneOf<int, float>>().get<float>() == 23.5));
+  }
 }
 
 }  // namespace kj

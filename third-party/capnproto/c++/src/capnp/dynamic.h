@@ -30,18 +30,16 @@
 // As always, underlying data is validated lazily, so you have to actually traverse the whole
 // message if you want to validate all content.
 
-#ifndef CAPNP_DYNAMIC_H_
-#define CAPNP_DYNAMIC_H_
-
-#if defined(__GNUC__) && !defined(CAPNP_HEADER_WARNINGS)
-#pragma GCC system_header
-#endif
+#pragma once
 
 #include "schema.h"
 #include "layout.h"
 #include "message.h"
 #include "any.h"
 #include "capability.h"
+#include <kj/windows-sanity.h>  // work-around macro conflict with `VOID`
+
+CAPNP_BEGIN_HEADER
 
 namespace capnp {
 
@@ -170,6 +168,21 @@ private:
 
 // -------------------------------------------------------------------
 
+enum class HasMode: uint8_t {
+  // Specifies the meaning of "has(field)".
+
+  NON_NULL,
+  // "has(field)" only returns false if the field is a pointer and the pointer is null. This is the
+  // default behavior.
+
+  NON_DEFAULT
+  // "has(field)" returns false if the field is set to its default value. This differs from
+  // NON_NULL only in the handling of primitive values.
+  //
+  // "Equal to default value" is technically defined as the field value being encoded as all-zero
+  // on the wire (since primitive values are XORed by their defined default value when encoded).
+};
+
 class DynamicStruct::Reader {
 public:
   typedef DynamicStruct Reads;
@@ -178,6 +191,8 @@ public:
 
   template <typename T, typename = kj::EnableIf<kind<FromReader<T>>() == Kind::STRUCT>>
   inline Reader(T&& value): Reader(toDynamic(value)) {}
+
+  inline operator AnyStruct::Reader() const { return AnyStruct::Reader(reader); }
 
   inline MessageSize totalSize() const { return reader.totalSize().asPublic(); }
 
@@ -190,12 +205,10 @@ public:
   DynamicValue::Reader get(StructSchema::Field field) const;
   // Read the given field value.
 
-  bool has(StructSchema::Field field) const;
-  // Tests whether the given field is set to its default value.  For pointer values, this does
-  // not actually traverse the value comparing it with the default, but simply returns true if the
-  // pointer is non-null.  For members of unions, has() returns false if the union member is not
-  // active, but does not necessarily return true if the member is active (depends on the field's
-  // value).
+  bool has(StructSchema::Field field, HasMode mode = HasMode::NON_NULL) const;
+  // Tests whether the given field is "present". If the field is a union member and is not the
+  // active member, this always returns false. Otherwise, the field's value is interpreted
+  // according to `mode`.
 
   kj::Maybe<StructSchema::Field> which() const;
   // If the struct contains an (unnamed) union, and the currently-active field within that union
@@ -205,7 +218,7 @@ public:
   // newer version of the protocol and is using a field of the union that you don't know about yet.
 
   DynamicValue::Reader get(kj::StringPtr name) const;
-  bool has(kj::StringPtr name) const;
+  bool has(kj::StringPtr name, HasMode mode = HasMode::NON_NULL) const;
   // Shortcuts to access fields by name.  These throw exceptions if no such field exists.
 
 private:
@@ -234,6 +247,7 @@ private:
   friend class Orphan<DynamicStruct>;
   friend class Orphan<DynamicValue>;
   friend class Orphan<AnyPointer>;
+  friend class AnyStruct::Reader;
 };
 
 class DynamicStruct::Builder {
@@ -246,6 +260,8 @@ public:
   template <typename T, typename = kj::EnableIf<kind<FromBuilder<T>>() == Kind::STRUCT>>
   inline Builder(T&& value): Builder(toDynamic(value)) {}
 
+  inline operator AnyStruct::Builder() { return AnyStruct::Builder(builder); }
+
   inline MessageSize totalSize() const { return asReader().totalSize(); }
 
   template <typename T>
@@ -257,12 +273,11 @@ public:
   DynamicValue::Builder get(StructSchema::Field field);
   // Read the given field value.
 
-  inline bool has(StructSchema::Field field) { return asReader().has(field); }
-  // Tests whether the given field is set to its default value.  For pointer values, this does
-  // not actually traverse the value comparing it with the default, but simply returns true if the
-  // pointer is non-null.  For members of unions, has() returns whether the field is currently
-  // active and the union as a whole is non-default -- so, the only time has() will return false
-  // for an active union field is if it is the default active field and it has its default value.
+  inline bool has(StructSchema::Field field, HasMode mode = HasMode::NON_NULL)
+      { return asReader().has(field, mode); }
+  // Tests whether the given field is "present". If the field is a union member and is not the
+  // active member, this always returns false. Otherwise, the field's value is interpreted
+  // according to `mode`.
 
   kj::Maybe<StructSchema::Field> which();
   // If the struct contains an (unnamed) union, and the currently-active field within that union
@@ -288,7 +303,7 @@ public:
   // field null.
 
   DynamicValue::Builder get(kj::StringPtr name);
-  bool has(kj::StringPtr name);
+  bool has(kj::StringPtr name, HasMode mode = HasMode::NON_NULL);
   void set(kj::StringPtr name, const DynamicValue::Reader& value);
   void set(kj::StringPtr name, std::initializer_list<DynamicValue::Reader> value);
   DynamicValue::Builder init(kj::StringPtr name);
@@ -323,6 +338,7 @@ private:
   friend class Orphan<DynamicStruct>;
   friend class Orphan<DynamicValue>;
   friend class Orphan<AnyPointer>;
+  friend class AnyStruct::Builder;
 };
 
 class DynamicStruct::Pipeline {
@@ -363,6 +379,8 @@ public:
 
   template <typename T, typename = kj::EnableIf<kind<FromReader<T>>() == Kind::LIST>>
   inline Reader(T&& value): Reader(toDynamic(value)) {}
+
+  inline operator AnyList::Reader() const { return AnyList::Reader(reader); }
 
   template <typename T>
   typename T::Reader as() const;
@@ -406,6 +424,8 @@ public:
 
   template <typename T, typename = kj::EnableIf<kind<FromBuilder<T>>() == Kind::LIST>>
   inline Builder(T&& value): Builder(toDynamic(value)) {}
+
+  inline operator AnyList::Builder() { return AnyList::Builder(builder); }
 
   template <typename T>
   typename T::Builder as();
@@ -509,8 +529,8 @@ public:
   virtual kj::Promise<void> call(InterfaceSchema::Method method,
                                  CallContext<DynamicStruct, DynamicStruct> context) = 0;
 
-  kj::Promise<void> dispatchCall(uint64_t interfaceId, uint16_t methodId,
-                                 CallContext<AnyPointer, AnyPointer> context) override final;
+  DispatchCallResult dispatchCall(uint64_t interfaceId, uint16_t methodId,
+                                  CallContext<AnyPointer, AnyPointer> context) override final;
 
   inline InterfaceSchema getSchema() const { return schema; }
 
@@ -529,6 +549,10 @@ public:
 
   RemotePromise<DynamicStruct> send();
   // Send the call and return a promise for the results.
+
+  kj::Promise<void> sendStreaming();
+  // Use when the caller is aware that the response type is StreamResult and wants to invoke
+  // streaming behavior. It is an error to call this if the response type is not StreamResult.
 
 private:
   kj::Own<RequestHook> hook;
@@ -561,6 +585,9 @@ public:
   template <typename SubParams>
   kj::Promise<void> tailCall(Request<SubParams, DynamicStruct>&& tailRequest);
   void allowCancellation();
+
+  StructSchema getParamsType() const { return paramType; }
+  StructSchema getResultsType() const { return resultType; }
 
 private:
   CallContextHook* hook;
@@ -1516,6 +1543,16 @@ inline AnyStruct::Builder DynamicStruct::Builder::as<AnyStruct>() {
   return AnyStruct::Builder(builder);
 }
 
+template <>
+inline DynamicStruct::Reader AnyStruct::Reader::as<DynamicStruct>(StructSchema schema) const {
+  return DynamicStruct::Reader(schema, _reader);
+}
+
+template <>
+inline DynamicStruct::Builder AnyStruct::Builder::as<DynamicStruct>(StructSchema schema) {
+  return DynamicStruct::Builder(schema, _builder);
+}
+
 template <typename T>
 typename T::Pipeline DynamicStruct::Pipeline::releaseAs() {
   static_assert(kind<T>() == Kind::STRUCT,
@@ -1631,6 +1668,14 @@ inline DynamicCapability::Client Capability::Client::castAs<DynamicCapability>(
   return DynamicCapability::Client(schema, hook->addRef());
 }
 
+template <>
+inline DynamicCapability::Client CapabilityServerSet<DynamicCapability>::add(
+    kj::Own<DynamicCapability::Server>&& server) {
+  void* ptr = reinterpret_cast<void*>(server.get());
+  auto schema = server->getSchema();
+  return addInternal(kj::mv(server), ptr).castAs<DynamicCapability>(schema);
+}
+
 // -------------------------------------------------------------------
 
 template <typename T>
@@ -1640,4 +1685,4 @@ ReaderFor<T> ConstSchema::as() const {
 
 }  // namespace capnp
 
-#endif  // CAPNP_DYNAMIC_H_
+CAPNP_END_HEADER

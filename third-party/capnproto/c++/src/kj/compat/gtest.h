@@ -19,8 +19,7 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 // THE SOFTWARE.
 
-#ifndef KJ_COMPAT_GTEST_H_
-#define KJ_COMPAT_GTEST_H_
+#pragma once
 // This file defines compatibility macros converting Google Test tests into KJ tests.
 //
 // This is only intended to cover the most common functionality. Many tests will likely need
@@ -31,6 +30,9 @@
 //   in the constructor, teardown in the destructor.
 
 #include "../test.h"
+#include <kj/windows-sanity.h>  // work-around macro conflict with `ERROR`
+
+KJ_BEGIN_HEADER
 
 namespace kj {
 
@@ -119,4 +121,4 @@ private:
 
 }  // namespace kj
 
-#endif  // KJ_COMPAT_GTEST_H_
+KJ_END_HEADER

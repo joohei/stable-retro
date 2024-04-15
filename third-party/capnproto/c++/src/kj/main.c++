@@ -19,6 +19,14 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 // THE SOFTWARE.
 
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
+
+#if _WIN32
+#include "win32-api-version.h"
+#endif
+
 #include "main.h"
 #include "debug.h"
 #include "arena.h"
@@ -30,10 +38,6 @@
 #include <limits.h>
 
 #if _WIN32
-#define WIN32_LEAN_AND_MEAN
-#ifndef NOMINMAX
-#define NOMINMAX 1
-#endif
 #include <windows.h>
 #include "windows-sanity.h"
 #else
@@ -631,7 +635,7 @@ void MainBuilder::MainImpl::usageError(StringPtr programName, StringPtr message)
 
 class MainBuilder::Impl::OptionDisplayOrder {
 public:
-  bool operator()(const Option* a, const Option* b) {
+  bool operator()(const Option* a, const Option* b) const {
     if (a == b) return false;
 
     char aShort = '\0';

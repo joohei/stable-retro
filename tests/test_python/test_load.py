@@ -19,7 +19,7 @@ def processpool():
         global pool
         try:
             future = pool.submit(fn, *args)
-            return future.result(2)
+            return future.result()
         except BrokenProcessPool:
             pool = ProcessPoolExecutor(1)
             return [], [(args[0], "subprocess crashed")]

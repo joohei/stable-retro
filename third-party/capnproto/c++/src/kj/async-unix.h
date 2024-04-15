@@ -19,26 +19,31 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 // THE SOFTWARE.
 
-#ifndef KJ_ASYNC_UNIX_H_
-#define KJ_ASYNC_UNIX_H_
+#pragma once
 
 #if _WIN32
 #error "This file is Unix-specific. On Windows, include async-win32.h instead."
 #endif
 
-#if defined(__GNUC__) && !KJ_HEADER_WARNINGS
-#pragma GCC system_header
-#endif
-
 #include "async.h"
-#include "time.h"
+#include "timer.h"
 #include "vector.h"
 #include "io.h"
 #include <signal.h>
 
+KJ_BEGIN_HEADER
+
 #if __linux__ && !__BIONIC__ && !defined(KJ_USE_EPOLL)
 // Default to epoll on Linux, except on Bionic (Android) which doesn't have signalfd.h.
 #define KJ_USE_EPOLL 1
+#endif
+
+#if __CYGWIN__ && !defined(KJ_USE_PIPE_FOR_WAKEUP)
+// Cygwin has serious issues with the intersection of signals and threads, reported here:
+//     https://cygwin.com/ml/cygwin/2019-07/msg00052.html
+// On Cygwin, therefore, we do not use signals to wake threads. Instead, each thread allocates a
+// pipe, and we write a byte to the pipe to wake the thread... ick.
+#define KJ_USE_PIPE_FOR_WAKEUP 1
 #endif
 
 namespace kj {
@@ -99,22 +104,56 @@ public:
 
   Timer& getTimer() { return timerImpl; }
 
+  Promise<int> onChildExit(Maybe<pid_t>& pid);
+  // When the given child process exits, resolves to its wait status, as returned by wait(2). You
+  // will need to use the WIFEXITED() etc. macros to interpret the status code.
+  //
+  // You must call onChildExit() immediately after the child is created, before returning to the
+  // event loop. Otherwise, you may miss the child exit event.
+  //
+  // `pid` is a reference to a Maybe<pid_t> which must be non-null at the time of the call. When
+  // wait() is invoked (and indicates this pid has finished), `pid` will be nulled out. This is
+  // necessary to avoid a race condition: as soon as the child has been wait()ed, the PID table
+  // entry is freed and can then be reused. So, if you ever want safely to call `kill()` on the
+  // PID, it's necessary to know whether it has been wait()ed already. Since the promise's
+  // .then() continuation may not run immediately, we need a more precise way, hence we null out
+  // the Maybe.
+  //
+  // You must call `kj::UnixEventPort::captureChildExit()` early in your program if you want to use
+  // `onChildExit()`.
+  //
+  // WARNING: Only one UnixEventPort per process is allowed to use onChildExit(). This is because
+  //   child exit is signaled to the process via SIGCHLD, and Unix does not allow the program to
+  //   control which thread receives the signal. (We may fix this in the future by automatically
+  //   coordinating between threads when multiple threads are expecting child exits.)
+  // WARNING 2: If any UnixEventPort in the process is currently waiting for onChildExit(), then
+  //   *only* that port's thread can safely wait on child processes, even synchronously. This is
+  //   because the thread which used onChildExit() uses wait() to reap children, without specifying
+  //   which child, and therefore it may inadvertently reap children created by other threads.
+
+  static void captureChildExit();
+  // Arranges for child process exit to be captured and handled via UnixEventPort, so that you may
+  // call `onChildExit()`. Much like `captureSignal()`, this static method must be called early on
+  // in program startup.
+  //
+  // This method may capture the `SIGCHLD` signal. You must not use `captureSignal(SIGCHLD)` nor
+  // `onSignal(SIGCHLD)` in your own code if you use `captureChildExit()`.
+
   // implements EventPort ------------------------------------------------------
   bool wait() override;
   bool poll() override;
   void wake() const override;
 
 private:
-  struct TimerSet;  // Defined in source file to avoid STL include.
-  class TimerPromiseAdapter;
   class SignalPromiseAdapter;
+  class ChildExitPromiseAdapter;
 
+  const MonotonicClock& clock;
   TimerImpl timerImpl;
 
   SignalPromiseAdapter* signalHead = nullptr;
   SignalPromiseAdapter** signalTail = &signalHead;
 
-  TimePoint readClock();
   void gotSignal(const siginfo_t& siginfo);
 
   friend class TimerPromiseAdapter;
@@ -136,8 +175,16 @@ private:
   FdObserver* observersHead = nullptr;
   FdObserver** observersTail = &observersHead;
 
+#if KJ_USE_PIPE_FOR_WAKEUP
+  AutoCloseFd wakePipeIn;
+  AutoCloseFd wakePipeOut;
+#else
   unsigned long long threadId;  // actually pthread_t
 #endif
+#endif
+
+  struct ChildSet;
+  Maybe<Own<ChildSet>> childSet;
 };
 
 class UnixEventPort::FdObserver {
@@ -240,7 +287,10 @@ public:
   // has not yet resolved. If you do this, the previous promise may throw an exception.
   //
   // WARNING: This has some known weird behavior on macOS. See
-  //   https://github.com/sandstorm-io/capnproto/issues/374.
+  //   https://github.com/capnproto/capnproto/issues/374.
+
+  Promise<void> whenWriteDisconnected();
+  // Resolves when poll() on the file descriptor reports POLLHUP or POLLERR.
 
 private:
   UnixEventPort& eventPort;
@@ -250,6 +300,7 @@ private:
   kj::Maybe<Own<PromiseFulfiller<void>>> readFulfiller;
   kj::Maybe<Own<PromiseFulfiller<void>>> writeFulfiller;
   kj::Maybe<Own<PromiseFulfiller<void>>> urgentFulfiller;
+  kj::Maybe<Own<PromiseFulfiller<void>>> hupFulfiller;
   // Replaced each time `whenBecomesReadable()` or `whenBecomesWritable()` is called. Reverted to
   // null every time an event is fired.
 
@@ -271,4 +322,4 @@ private:
 
 }  // namespace kj
 
-#endif  // KJ_ASYNC_UNIX_H_
+KJ_END_HEADER

@@ -1,4 +1,36 @@
-.TH "ZIP_OPEN" "3" "December 18, 2017" "NiH" "Library Functions Manual"
+.\" Automatically generated from an mdoc input file.  Do not edit.
+.\" zip_open.mdoc -- open zip archive
+.\" Copyright (C) 2003-2022 Dieter Baron and Thomas Klausner
+.\"
+.\" This file is part of libzip, a library to manipulate ZIP archives.
+.\" The authors can be contacted at <info@libzip.org>
+.\"
+.\" Redistribution and use in source and binary forms, with or without
+.\" modification, are permitted provided that the following conditions
+.\" are met:
+.\" 1. Redistributions of source code must retain the above copyright
+.\"    notice, this list of conditions and the following disclaimer.
+.\" 2. Redistributions in binary form must reproduce the above copyright
+.\"    notice, this list of conditions and the following disclaimer in
+.\"    the documentation and/or other materials provided with the
+.\"    distribution.
+.\" 3. The names of the authors may not be used to endorse or promote
+.\"    products derived from this software without specific prior
+.\"    written permission.
+.\"
+.\" THIS SOFTWARE IS PROVIDED BY THE AUTHORS ``AS IS'' AND ANY EXPRESS
+.\" OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+.\" WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+.\" ARE DISCLAIMED.  IN NO EVENT SHALL THE AUTHORS BE LIABLE FOR ANY
+.\" DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+.\" DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE
+.\" GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+.\" INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER
+.\" IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
+.\" OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN
+.\" IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+.\"
+.TH "ZIP_OPEN" "3" "October 9, 2022" "NiH" "Library Functions Manual"
 .nh
 .if n .ad l
 .SH "NAME"
@@ -90,6 +122,25 @@ to indicate the error, while
 sets
 \fIze\fR
 to indicate the error.
+.SH "EXAMPLES"
+Here's an example of how you could report errors during
+\fBzip_open\fR:
+.nf
+.sp
+.RS 0n
+    zip_t *za;
+    int err;
+
+    if ((za = zip_open(name, 0, &err)) == NULL) {
+        zip_error_t error;
+        zip_error_init_with_code(&error, err);
+        fprintf(stderr, "%s: cannot open zip archive '%s': %s\en",
+	        progname, name, zip_error_strerror(&error));
+        zip_error_fini(&error);
+        return -1;
+    }
+.RE
+.fi
 .SH "ERRORS"
 The archive specified by
 \fIpath\fR
@@ -144,10 +195,19 @@ for details.
 The file specified by
 \fIpath\fR
 does not allow seeks.
+.PD 0
+.PP
+For newly created archives,
+\fBzip_open\fR()
+does not try to create the file; this is done when calling
+zip_close(3)
+and any errors, like missing write permissions, will
+be reported then.
+.PD
 .SH "SEE ALSO"
 libzip(3),
 zip_close(3),
-zip_error_to_str(3),
+zip_error_strerror(3),
 zip_fdopen(3)
 .SH "HISTORY"
 \fBzip_open\fR()

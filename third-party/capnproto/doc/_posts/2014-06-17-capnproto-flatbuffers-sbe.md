@@ -98,7 +98,7 @@ The down side of reflection is that it is generally very slow (compared to gener
 
 When building a message, depending on how your code is organized, it may be convenient to have flexibility in the order in which you fill in the data. If that flexibility is missing, you may find you have to do extra bookkeeping to store data off to the side until its time comes to be added to the message.
 
-Protocol Buffers is natually completely flexible in terms of initialization order because the mesasge is being built on the heap. There is no reason to impose restrictions. (Although, the C++ Protobuf library heavily encourages top-down building.)
+Protocol Buffers is naturally completely flexible in terms of initialization order because the message is being built on the heap. There is no reason to impose restrictions. (Although, the C++ Protobuf library heavily encourages top-down building.)
 
 All the zero-copy systems, though, have to use some form of arena allocation to make sure that the message is built in a contiguous block of memory that can be written out all at once. So, things get more complicated.
 
@@ -203,3 +203,4 @@ The fact of the matter is that the relative performance of these libraries depen
 With that said, my intuition is that SBE will probably edge Cap'n Proto and FlatBuffers on performance in the average case, due to its decision to forgo support for random access. Between Cap'n Proto and FlatBuffers, it's harder to say. FlatBuffers' vtable approach seems like it would make access more expensive, though its simpler pointer format may be cheaper to follow. FlatBuffers also appears to do a lot of bookkeeping at encoding time which could get costly (such as de-duping vtables), but I don't know how costly.
 
 For most people, the performance difference is probably small enough that qualitative (feature) differences in the libraries matter more.
+

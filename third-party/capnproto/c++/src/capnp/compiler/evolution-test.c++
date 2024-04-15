@@ -26,6 +26,10 @@
 // the types are expected to be compatible, the test also constructs an instance of the old
 // type and reads it as the new type, and vice versa.
 
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
+
 #include <capnp/compiler/grammar.capnp.h>
 #include <capnp/schema-loader.h>
 #include <capnp/message.h>
@@ -678,7 +682,7 @@ static kj::Maybe<kj::Exception> loadFile(
     uint sharedOrdinalCount) {
   Compiler compiler;
   ModuleImpl module(file);
-  KJ_ASSERT(compiler.add(module) == 0x8123456789abcdefllu);
+  KJ_ASSERT(compiler.add(module).getId() == 0x8123456789abcdefllu);
 
   if (allNodes) {
     // Eagerly compile and load the whole thing.
@@ -868,7 +872,7 @@ public:
   }
 
   kj::MainBuilder::Validity run() {
-    // https://github.com/sandstorm-io/capnproto/issues/344 describes an obscure bug in the layout
+    // https://github.com/capnproto/capnproto/issues/344 describes an obscure bug in the layout
     // algorithm, the fix for which breaks backwards-compatibility for any schema triggering the
     // bug. In order to avoid silently breaking protocols, we are temporarily throwing an exception
     // in cases where this bug would have occurred, so that people can decide what to do.

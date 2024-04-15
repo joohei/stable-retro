@@ -30,28 +30,29 @@
 #include <set>
 #include <unordered_map>
 #include "node-translator.h"
-#include "md5.h"
 
 namespace capnp {
 namespace compiler {
+
+typedef std::unordered_map<uint64_t, Orphan<schema::Node::SourceInfo::Reader>> SourceInfoMap;
 
 class Compiler::Alias {
 public:
   Alias(CompiledModule& module, Node& parent, const Expression::Reader& targetName)
       : module(module), parent(parent), targetName(targetName) {}
 
-  kj::Maybe<NodeTranslator::Resolver::ResolveResult> compile();
+  kj::Maybe<Resolver::ResolveResult> compile();
 
 private:
   CompiledModule& module;
   Node& parent;
   Expression::Reader targetName;
-  kj::Maybe<NodeTranslator::Resolver::ResolveResult> target;
+  kj::Maybe<Resolver::ResolveResult> target;
   Orphan<schema::Brand> brandOrphan;
   bool initialized = false;
 };
 
-class Compiler::Node final: public NodeTranslator::Resolver {
+class Compiler::Node final: public Resolver {
   // Passes through four states:
   // - Stub:  On initial construction, the Node is just a placeholder object.  Its ID has been
   //     determined, and it is placed in its parent's member table as well as the compiler's
@@ -81,14 +82,15 @@ public:
   void loadFinalSchema(const SchemaLoader& loader);
 
   void traverse(uint eagerness, std::unordered_map<Node*, uint>& seen,
-                const SchemaLoader& finalLoader);
+                const SchemaLoader& finalLoader,
+                kj::Vector<schema::Node::SourceInfo::Reader>& sourceInfo);
   // Get the final schema for this node, and also possibly traverse the node's children and
   // dependencies to ensure that they are loaded, depending on the mode.
 
   void addError(kj::StringPtr error);
   // Report an error on this Node.
 
-  // implements NodeTranslator::Resolver -----------------------------
+  // implements Resolver ---------------------------------------------
   kj::Maybe<ResolveResult> resolve(kj::StringPtr name) override;
   kj::Maybe<ResolveResult> resolveMember(kj::StringPtr name) override;
   ResolvedDecl resolveBuiltin(Declaration::Which which) override;
@@ -177,6 +179,9 @@ private:
 
     kj::Array<schema::Node::Reader> auxSchemas;
     // Schemas for all auxiliary nodes built by the NodeTranslator.
+
+    kj::Array<schema::Node::SourceInfo::Reader> sourceInfo;
+    // All source info structs as built by the NodeTranslator.
   };
 
   Content guardedContent;     // Read using getContent() only!
@@ -204,19 +209,24 @@ private:
 
   void traverseNodeDependencies(const schema::Node::Reader& schemaNode, uint eagerness,
                                 std::unordered_map<Node*, uint>& seen,
-                                const SchemaLoader& finalLoader);
+                                const SchemaLoader& finalLoader,
+                                kj::Vector<schema::Node::SourceInfo::Reader>& sourceInfo);
   void traverseType(const schema::Type::Reader& type, uint eagerness,
                     std::unordered_map<Node*, uint>& seen,
-                    const SchemaLoader& finalLoader);
+                    const SchemaLoader& finalLoader,
+                    kj::Vector<schema::Node::SourceInfo::Reader>& sourceInfo);
   void traverseBrand(const schema::Brand::Reader& brand, uint eagerness,
                      std::unordered_map<Node*, uint>& seen,
-                     const SchemaLoader& finalLoader);
+                     const SchemaLoader& finalLoader,
+                     kj::Vector<schema::Node::SourceInfo::Reader>& sourceInfo);
   void traverseAnnotations(const List<schema::Annotation>::Reader& annotations, uint eagerness,
                            std::unordered_map<Node*, uint>& seen,
-                           const SchemaLoader& finalLoader);
+                           const SchemaLoader& finalLoader,
+                           kj::Vector<schema::Node::SourceInfo::Reader>& sourceInfo);
   void traverseDependency(uint64_t depId, uint eagerness,
                           std::unordered_map<Node*, uint>& seen,
                           const SchemaLoader& finalLoader,
+                          kj::Vector<schema::Node::SourceInfo::Reader>& sourceInfo,
                           bool ignoreIfNotFound = false);
   // Helpers for traverse().
 };
@@ -253,8 +263,10 @@ public:
 
   uint64_t add(Module& module);
   kj::Maybe<uint64_t> lookup(uint64_t parent, kj::StringPtr childName);
+  kj::Maybe<schema::Node::SourceInfo::Reader> getSourceInfo(uint64_t id);
   Orphan<List<schema::CodeGeneratorRequest::RequestedFile::Import>>
       getFileImportTable(Module& module, Orphanage orphanage);
+  Orphan<List<schema::Node::SourceInfo>> getAllSourceInfo(Orphanage orphanage);
   void eagerlyCompile(uint64_t id, uint eagerness, const SchemaLoader& loader);
   CompiledModule& addInternal(Module& parsedModule);
 
@@ -330,6 +342,10 @@ private:
   std::unordered_map<uint64_t, Node*> nodesById;
   // Map of nodes by ID.
 
+  std::unordered_map<uint64_t, schema::Node::SourceInfo::Reader> sourceInfoById;
+  // Map of SourceInfos by ID, including SourceInfos for groups and param sturcts (which are not
+  // listed in nodesById).
+
   std::map<kj::StringPtr, kj::Own<Node>> builtinDecls;
   std::map<Declaration::Which, Node*> builtinDeclsByKind;
   // Map of built-in declarations, like "Int32" and "List", which make up the global scope.
@@ -340,7 +356,7 @@ private:
 
 // =======================================================================================
 
-kj::Maybe<NodeTranslator::Resolver::ResolveResult> Compiler::Alias::compile() {
+kj::Maybe<Resolver::ResolveResult> Compiler::Alias::compile() {
   if (!initialized) {
     initialized = true;
 
@@ -504,8 +520,7 @@ kj::Maybe<Compiler::Node::Content&> Compiler::Node::getContent(Content::State mi
       }
 
       content.advanceState(Content::EXPANDED);
-      // no break
-    }
+    } KJ_FALLTHROUGH;
 
     case Content::EXPANDED: {
       if (minimumState <= Content::EXPANDED) break;
@@ -568,20 +583,28 @@ kj::Maybe<Compiler::Node::Content&> Compiler::Node::getContent(Content::State mi
       }));
 
       content.advanceState(Content::BOOTSTRAP);
-      // no break
-    }
+    } KJ_FALLTHROUGH;
 
     case Content::BOOTSTRAP: {
       if (minimumState <= Content::BOOTSTRAP) break;
 
       // Create the final schema.
-      auto nodeSet = content.translator->finish();
+      NodeTranslator::NodeSet nodeSet;
+      if (content.bootstrapSchema == nullptr) {
+        // Must have failed in an earlier stage.
+        KJ_ASSERT(module->getErrorReporter().hadErrors());
+        nodeSet = content.translator->getBootstrapNode();
+      } else {
+        nodeSet = content.translator->finish(
+            module->getCompiler().getWorkspace().bootstrapLoader.getUnbound(id));
+      }
+
       content.finalSchema = nodeSet.node;
       content.auxSchemas = kj::mv(nodeSet.auxNodes);
+      content.sourceInfo = kj::mv(nodeSet.sourceInfo);
 
       content.advanceState(Content::FINISHED);
-      // no break
-    }
+    } KJ_FALLTHROUGH;
 
     case Content::FINISHED:
       break;
@@ -645,7 +668,8 @@ void Compiler::Node::loadFinalSchema(const SchemaLoader& loader) {
 }
 
 void Compiler::Node::traverse(uint eagerness, std::unordered_map<Node*, uint>& seen,
-                              const SchemaLoader& finalLoader) {
+                              const SchemaLoader& finalLoader,
+                              kj::Vector<schema::Node::SourceInfo::Reader>& sourceInfo) {
   uint& slot = seen[this];
   if ((slot & eagerness) == eagerness) {
     // We've already covered this node.
@@ -662,24 +686,26 @@ void Compiler::Node::traverse(uint eagerness, std::unordered_map<Node*, uint>& s
         // them with the bits above DEPENDENCIES shifted over.
         uint newEagerness = (eagerness & ~(DEPENDENCIES - 1)) | (eagerness / DEPENDENCIES);
 
-        traverseNodeDependencies(*schema, newEagerness, seen, finalLoader);
+        traverseNodeDependencies(*schema, newEagerness, seen, finalLoader, sourceInfo);
         for (auto& aux: content->auxSchemas) {
-          traverseNodeDependencies(aux, newEagerness, seen, finalLoader);
+          traverseNodeDependencies(aux, newEagerness, seen, finalLoader, sourceInfo);
         }
       }
     }
+
+    sourceInfo.addAll(content->sourceInfo);
   }
 
   if (eagerness & PARENTS) {
     KJ_IF_MAYBE(p, parent) {
-      p->traverse(eagerness, seen, finalLoader);
+      p->traverse(eagerness, seen, finalLoader, sourceInfo);
     }
   }
 
   if (eagerness & CHILDREN) {
     KJ_IF_MAYBE(content, getContent(Content::EXPANDED)) {
       for (auto& child: content->orderedNestedNodes) {
-        child->traverse(eagerness, seen, finalLoader);
+        child->traverse(eagerness, seen, finalLoader, sourceInfo);
       }
 
       // Also traverse `using` declarations.
@@ -693,26 +719,27 @@ void Compiler::Node::traverse(uint eagerness, std::unordered_map<Node*, uint>& s
 void Compiler::Node::traverseNodeDependencies(
     const schema::Node::Reader& schemaNode, uint eagerness,
     std::unordered_map<Node*, uint>& seen,
-    const SchemaLoader& finalLoader) {
+    const SchemaLoader& finalLoader,
+    kj::Vector<schema::Node::SourceInfo::Reader>& sourceInfo) {
   switch (schemaNode.which()) {
     case schema::Node::STRUCT:
       for (auto field: schemaNode.getStruct().getFields()) {
         switch (field.which()) {
           case schema::Field::SLOT:
-            traverseType(field.getSlot().getType(), eagerness, seen, finalLoader);
+            traverseType(field.getSlot().getType(), eagerness, seen, finalLoader, sourceInfo);
             break;
           case schema::Field::GROUP:
             // Aux node will be scanned later.
             break;
         }
 
-        traverseAnnotations(field.getAnnotations(), eagerness, seen, finalLoader);
+        traverseAnnotations(field.getAnnotations(), eagerness, seen, finalLoader, sourceInfo);
       }
       break;
 
     case schema::Node::ENUM:
       for (auto enumerant: schemaNode.getEnum().getEnumerants()) {
-        traverseAnnotations(enumerant.getAnnotations(), eagerness, seen, finalLoader);
+        traverseAnnotations(enumerant.getAnnotations(), eagerness, seen, finalLoader, sourceInfo);
       }
       break;
 
@@ -721,38 +748,41 @@ void Compiler::Node::traverseNodeDependencies(
       for (auto superclass: interface.getSuperclasses()) {
         uint64_t superclassId = superclass.getId();
         if (superclassId != 0) {  // if zero, we reported an error earlier
-          traverseDependency(superclassId, eagerness, seen, finalLoader);
+          traverseDependency(superclassId, eagerness, seen, finalLoader, sourceInfo);
         }
-        traverseBrand(superclass.getBrand(), eagerness, seen, finalLoader);
+        traverseBrand(superclass.getBrand(), eagerness, seen, finalLoader, sourceInfo);
       }
       for (auto method: interface.getMethods()) {
-        traverseDependency(method.getParamStructType(), eagerness, seen, finalLoader, true);
-        traverseBrand(method.getParamBrand(), eagerness, seen, finalLoader);
-        traverseDependency(method.getResultStructType(), eagerness, seen, finalLoader, true);
-        traverseBrand(method.getResultBrand(), eagerness, seen, finalLoader);
-        traverseAnnotations(method.getAnnotations(), eagerness, seen, finalLoader);
+        traverseDependency(
+            method.getParamStructType(), eagerness, seen, finalLoader, sourceInfo, true);
+        traverseBrand(method.getParamBrand(), eagerness, seen, finalLoader, sourceInfo);
+        traverseDependency(
+            method.getResultStructType(), eagerness, seen, finalLoader, sourceInfo, true);
+        traverseBrand(method.getResultBrand(), eagerness, seen, finalLoader, sourceInfo);
+        traverseAnnotations(method.getAnnotations(), eagerness, seen, finalLoader, sourceInfo);
       }
       break;
     }
 
     case schema::Node::CONST:
-      traverseType(schemaNode.getConst().getType(), eagerness, seen, finalLoader);
+      traverseType(schemaNode.getConst().getType(), eagerness, seen, finalLoader, sourceInfo);
       break;
 
     case schema::Node::ANNOTATION:
-      traverseType(schemaNode.getAnnotation().getType(), eagerness, seen, finalLoader);
+      traverseType(schemaNode.getAnnotation().getType(), eagerness, seen, finalLoader, sourceInfo);
       break;
 
     default:
       break;
   }
 
-  traverseAnnotations(schemaNode.getAnnotations(), eagerness, seen, finalLoader);
+  traverseAnnotations(schemaNode.getAnnotations(), eagerness, seen, finalLoader, sourceInfo);
 }
 
 void Compiler::Node::traverseType(const schema::Type::Reader& type, uint eagerness,
                                   std::unordered_map<Node*, uint>& seen,
-                                  const SchemaLoader& finalLoader) {
+                                  const SchemaLoader& finalLoader,
+                                  kj::Vector<schema::Node::SourceInfo::Reader>& sourceInfo) {
   uint64_t id = 0;
   schema::Brand::Reader brand;
   switch (type.which()) {
@@ -769,20 +799,21 @@ void Compiler::Node::traverseType(const schema::Type::Reader& type, uint eagerne
       brand = type.getInterface().getBrand();
       break;
     case schema::Type::LIST:
-      traverseType(type.getList().getElementType(), eagerness, seen, finalLoader);
+      traverseType(type.getList().getElementType(), eagerness, seen, finalLoader, sourceInfo);
       return;
     default:
       return;
   }
 
-  traverseDependency(id, eagerness, seen, finalLoader);
-  traverseBrand(brand, eagerness, seen, finalLoader);
+  traverseDependency(id, eagerness, seen, finalLoader, sourceInfo);
+  traverseBrand(brand, eagerness, seen, finalLoader, sourceInfo);
 }
 
 void Compiler::Node::traverseBrand(
     const schema::Brand::Reader& brand, uint eagerness,
     std::unordered_map<Node*, uint>& seen,
-    const SchemaLoader& finalLoader) {
+    const SchemaLoader& finalLoader,
+    kj::Vector<schema::Node::SourceInfo::Reader>& sourceInfo) {
   for (auto scope: brand.getScopes()) {
     switch (scope.which()) {
       case schema::Brand::Scope::BIND:
@@ -791,7 +822,7 @@ void Compiler::Node::traverseBrand(
             case schema::Brand::Binding::UNBOUND:
               break;
             case schema::Brand::Binding::TYPE:
-              traverseType(binding.getType(), eagerness, seen, finalLoader);
+              traverseType(binding.getType(), eagerness, seen, finalLoader, sourceInfo);
               break;
           }
         }
@@ -805,9 +836,10 @@ void Compiler::Node::traverseBrand(
 void Compiler::Node::traverseDependency(uint64_t depId, uint eagerness,
                                         std::unordered_map<Node*, uint>& seen,
                                         const SchemaLoader& finalLoader,
+                                        kj::Vector<schema::Node::SourceInfo::Reader>& sourceInfo,
                                         bool ignoreIfNotFound) {
   KJ_IF_MAYBE(node, module->getCompiler().findNode(depId)) {
-    node->traverse(eagerness, seen, finalLoader);
+    node->traverse(eagerness, seen, finalLoader, sourceInfo);
   } else if (!ignoreIfNotFound) {
     KJ_FAIL_ASSERT("Dependency ID not present in compiler?", depId);
   }
@@ -816,10 +848,11 @@ void Compiler::Node::traverseDependency(uint64_t depId, uint eagerness,
 void Compiler::Node::traverseAnnotations(const List<schema::Annotation>::Reader& annotations,
                                          uint eagerness,
                                          std::unordered_map<Node*, uint>& seen,
-                                         const SchemaLoader& finalLoader) {
+                                         const SchemaLoader& finalLoader,
+                                         kj::Vector<schema::Node::SourceInfo::Reader>& sourceInfo) {
   for (auto annotation: annotations) {
     KJ_IF_MAYBE(node, module->getCompiler().findNode(annotation.getId())) {
-      node->traverse(eagerness, seen, finalLoader);
+      node->traverse(eagerness, seen, finalLoader, sourceInfo);
     }
   }
 }
@@ -829,7 +862,7 @@ void Compiler::Node::addError(kj::StringPtr error) {
   module->getErrorReporter().addError(startByte, endByte, error);
 }
 
-kj::Maybe<NodeTranslator::Resolver::ResolveResult>
+kj::Maybe<Resolver::ResolveResult>
 Compiler::Node::resolve(kj::StringPtr name) {
   // Check members.
   KJ_IF_MAYBE(member, resolveMember(name)) {
@@ -859,7 +892,7 @@ Compiler::Node::resolve(kj::StringPtr name) {
   }
 }
 
-kj::Maybe<NodeTranslator::Resolver::ResolveResult>
+kj::Maybe<Resolver::ResolveResult>
 Compiler::Node::resolveMember(kj::StringPtr name) {
   if (isBuiltin) return nullptr;
 
@@ -884,25 +917,25 @@ Compiler::Node::resolveMember(kj::StringPtr name) {
   return nullptr;
 }
 
-NodeTranslator::Resolver::ResolvedDecl Compiler::Node::resolveBuiltin(Declaration::Which which) {
+Resolver::ResolvedDecl Compiler::Node::resolveBuiltin(Declaration::Which which) {
   auto& b = module->getCompiler().getBuiltin(which);
   return { b.id, b.genericParamCount, 0, b.kind, &b, nullptr };
 }
 
-NodeTranslator::Resolver::ResolvedDecl Compiler::Node::resolveId(uint64_t id) {
+Resolver::ResolvedDecl Compiler::Node::resolveId(uint64_t id) {
   auto& n = KJ_ASSERT_NONNULL(module->getCompiler().findNode(id));
   uint64_t parentId = n.parent.map([](Node& n) { return n.id; }).orDefault(0);
   return { n.id, n.genericParamCount, parentId, n.kind, &n, nullptr };
 }
 
-kj::Maybe<NodeTranslator::Resolver::ResolvedDecl> Compiler::Node::getParent() {
+kj::Maybe<Resolver::ResolvedDecl> Compiler::Node::getParent() {
   return parent.map([](Node& parent) {
     uint64_t scopeId = parent.parent.map([](Node& gp) { return gp.id; }).orDefault(0);
     return ResolvedDecl { parent.id, parent.genericParamCount, scopeId, parent.kind, &parent, nullptr };
   });
 }
 
-NodeTranslator::Resolver::ResolvedDecl Compiler::Node::getTopScope() {
+Resolver::ResolvedDecl Compiler::Node::getTopScope() {
   Node& node = module->getRootNode();
   return ResolvedDecl { node.id, 0, 0, node.kind, &node, nullptr };
 }
@@ -930,7 +963,7 @@ kj::Maybe<schema::Node::Reader> Compiler::Node::resolveFinalSchema(uint64_t id) 
   }
 }
 
-kj::Maybe<NodeTranslator::Resolver::ResolvedDecl>
+kj::Maybe<Resolver::ResolvedDecl>
 Compiler::Node::resolveImport(kj::StringPtr name) {
   KJ_IF_MAYBE(m, module->importRelative(name)) {
     Node& root = m->getRootNode();
@@ -1024,6 +1057,25 @@ static void findImports(Expression::Reader exp, std::set<kj::StringPtr>& output)
   }
 }
 
+static void findImports(Declaration::ParamList::Reader paramList, std::set<kj::StringPtr>& output) {
+  switch (paramList.which()) {
+    case Declaration::ParamList::NAMED_LIST:
+      for (auto param: paramList.getNamedList()) {
+        findImports(param.getType(), output);
+        for (auto ann: param.getAnnotations()) {
+          findImports(ann.getName(), output);
+        }
+      }
+      break;
+    case Declaration::ParamList::TYPE:
+      findImports(paramList.getType(), output);
+      break;
+    case Declaration::ParamList::STREAM:
+      output.insert("/capnp/stream.capnp");
+      break;
+  }
+}
+
 static void findImports(Declaration::Reader decl, std::set<kj::StringPtr>& output) {
   switch (decl.which()) {
     case Declaration::USING:
@@ -1043,30 +1095,9 @@ static void findImports(Declaration::Reader decl, std::set<kj::StringPtr>& outpu
     case Declaration::METHOD: {
       auto method = decl.getMethod();
 
-      auto params = method.getParams();
-      if (params.isNamedList()) {
-        for (auto param: params.getNamedList()) {
-          findImports(param.getType(), output);
-          for (auto ann: param.getAnnotations()) {
-            findImports(ann.getName(), output);
-          }
-        }
-      } else {
-        findImports(params.getType(), output);
-      }
-
+      findImports(method.getParams(), output);
       if (method.getResults().isExplicit()) {
-        auto results = method.getResults().getExplicit();
-        if (results.isNamedList()) {
-          for (auto param: results.getNamedList()) {
-            findImports(param.getType(), output);
-            for (auto ann: param.getAnnotations()) {
-              findImports(ann.getName(), output);
-            }
-          }
-        } else {
-          findImports(results.getType(), output);
-        }
+        findImports(method.getResults().getExplicit(), output);
       }
       break;
     }
@@ -1203,16 +1234,12 @@ Compiler::Node& Compiler::Impl::getBuiltin(Declaration::Which which) {
   return *iter->second;
 }
 
-uint64_t Compiler::Impl::add(Module& module) {
-  return addInternal(module).getRootNode().getId();
-}
-
 kj::Maybe<uint64_t> Compiler::Impl::lookup(uint64_t parent, kj::StringPtr childName) {
   // Looking up members does not use the workspace, so we don't need to lock it.
   KJ_IF_MAYBE(parentNode, findNode(parent)) {
     KJ_IF_MAYBE(child, parentNode->resolveMember(childName)) {
-      if (child->is<NodeTranslator::Resolver::ResolvedDecl>()) {
-        return child->get<NodeTranslator::Resolver::ResolvedDecl>().id;
+      if (child->is<Resolver::ResolvedDecl>()) {
+        return child->get<Resolver::ResolvedDecl>().id;
       } else {
         // An alias. We don't support looking up aliases with this method.
         return nullptr;
@@ -1225,16 +1252,48 @@ kj::Maybe<uint64_t> Compiler::Impl::lookup(uint64_t parent, kj::StringPtr childN
   }
 }
 
+kj::Maybe<schema::Node::SourceInfo::Reader> Compiler::Impl::getSourceInfo(uint64_t id) {
+  auto iter = sourceInfoById.find(id);
+  if (iter == sourceInfoById.end()) {
+    return nullptr;
+  } else {
+    return iter->second;
+  }
+}
+
 Orphan<List<schema::CodeGeneratorRequest::RequestedFile::Import>>
     Compiler::Impl::getFileImportTable(Module& module, Orphanage orphanage) {
   return addInternal(module).getFileImportTable(orphanage);
+}
+
+Orphan<List<schema::Node::SourceInfo>> Compiler::Impl::getAllSourceInfo(Orphanage orphanage) {
+  auto result = orphanage.newOrphan<List<schema::Node::SourceInfo>>(sourceInfoById.size());
+
+  auto builder = result.get();
+  size_t i = 0;
+  for (auto& entry: sourceInfoById) {
+    builder.setWithCaveats(i++, entry.second);
+  }
+
+  return result;
 }
 
 void Compiler::Impl::eagerlyCompile(uint64_t id, uint eagerness,
                                     const SchemaLoader& finalLoader) {
   KJ_IF_MAYBE(node, findNode(id)) {
     std::unordered_map<Node*, uint> seen;
-    node->traverse(eagerness, seen, finalLoader);
+    kj::Vector<schema::Node::SourceInfo::Reader> sourceInfos;
+    node->traverse(eagerness, seen, finalLoader, sourceInfos);
+
+    // Copy the SourceInfo structures into permanent space so that they aren't invalidated when
+    // clearWorkspace() is called.
+    for (auto& sourceInfo: sourceInfos) {
+      auto words = nodeArena.allocateArray<word>(sourceInfo.totalSize().wordCount + 1);
+      memset(words.begin(), 0, words.asBytes().size());
+      copyToUnchecked(sourceInfo, words);
+      sourceInfoById.insert(std::make_pair(sourceInfo.getId(),
+          readMessageUnchecked<schema::Node::SourceInfo>(words.begin())));
+    }
   } else {
     KJ_FAIL_REQUIRE("id did not come from this Compiler.", id);
   }
@@ -1263,17 +1322,26 @@ Compiler::Compiler(AnnotationFlag annotationFlag)
       loader(*this) {}
 Compiler::~Compiler() noexcept(false) {}
 
-uint64_t Compiler::add(Module& module) const {
-  return impl.lockExclusive()->get()->add(module);
+Compiler::ModuleScope Compiler::add(Module& module) const {
+  Node& root = impl.lockExclusive()->get()->addInternal(module).getRootNode();
+  return ModuleScope(*this, root.getId(), root);
 }
 
 kj::Maybe<uint64_t> Compiler::lookup(uint64_t parent, kj::StringPtr childName) const {
   return impl.lockExclusive()->get()->lookup(parent, childName);
 }
 
+kj::Maybe<schema::Node::SourceInfo::Reader> Compiler::getSourceInfo(uint64_t id) const {
+  return impl.lockExclusive()->get()->getSourceInfo(id);
+}
+
 Orphan<List<schema::CodeGeneratorRequest::RequestedFile::Import>>
     Compiler::getFileImportTable(Module& module, Orphanage orphanage) const {
   return impl.lockExclusive()->get()->getFileImportTable(module, orphanage);
+}
+
+Orphan<List<schema::Node::SourceInfo>> Compiler::getAllSourceInfo(Orphanage orphanage) const {
+  return impl.lockExclusive()->get()->getAllSourceInfo(orphanage);
 }
 
 void Compiler::eagerlyCompile(uint64_t id, uint eagerness) const {
@@ -1286,6 +1354,117 @@ void Compiler::clearWorkspace() const {
 
 void Compiler::load(const SchemaLoader& loader, uint64_t id) const {
   impl.lockExclusive()->get()->loadFinal(loader, id);
+}
+
+// -----------------------------------------------------------------------------
+
+class Compiler::ErrorIgnorer: public ErrorReporter {
+public:
+  void addError(uint32_t startByte, uint32_t endByte, kj::StringPtr message) override {}
+  bool hadErrors() override { return false; }
+
+  static ErrorIgnorer instance;
+};
+Compiler::ErrorIgnorer Compiler::ErrorIgnorer::instance;
+
+kj::Maybe<Type> Compiler::CompiledType::getSchema() {
+  capnp::word scratch[32];
+  memset(&scratch, 0, sizeof(scratch));
+  capnp::MallocMessageBuilder message(scratch);
+  auto builder = message.getRoot<schema::Type>();
+
+  {
+    auto lock = compiler.impl.lockShared();
+    decl.get(lock).compileAsType(ErrorIgnorer::instance, builder);
+  }
+
+  // No need to pass `scope` as second parameter since CompiledType always represents a type
+  // expression evaluated free-standing, not in any scope.
+  return compiler.loader.getType(builder.asReader());
+}
+
+Compiler::CompiledType Compiler::CompiledType::clone() {
+  kj::ExternalMutexGuarded<BrandedDecl> newDecl;
+  {
+    auto lock = compiler.impl.lockExclusive();
+    newDecl.set(lock, kj::cp(decl.get(lock)));
+  }
+  return CompiledType(compiler, kj::mv(newDecl));
+}
+
+kj::Maybe<Compiler::CompiledType> Compiler::CompiledType::getMember(kj::StringPtr name) {
+  kj::ExternalMutexGuarded<BrandedDecl> newDecl;
+  bool found = false;
+
+  {
+    auto lock = compiler.impl.lockShared();
+    KJ_IF_MAYBE(member, decl.get(lock).getMember(name, {})) {
+      newDecl.set(lock, kj::mv(*member));
+      found = true;
+    }
+  }
+
+  if (found) {
+    return CompiledType(compiler, kj::mv(newDecl));
+  } else {
+    return nullptr;
+  }
+}
+
+kj::Maybe<Compiler::CompiledType> Compiler::CompiledType::applyBrand(
+    kj::Array<CompiledType> arguments) {
+  kj::ExternalMutexGuarded<BrandedDecl> newDecl;
+  bool found = false;
+
+  {
+    auto lock = compiler.impl.lockShared();
+    auto args = KJ_MAP(arg, arguments) { return kj::mv(arg.decl.get(lock)); };
+    KJ_IF_MAYBE(member, decl.get(lock).applyParams(kj::mv(args), {})) {
+      newDecl.set(lock, kj::mv(*member));
+      found = true;
+    }
+  }
+
+  if (found) {
+    return CompiledType(compiler, kj::mv(newDecl));
+  } else {
+    return nullptr;
+  }
+}
+
+Compiler::CompiledType Compiler::ModuleScope::getRoot() {
+  kj::ExternalMutexGuarded<BrandedDecl> newDecl;
+
+  {
+    auto lock = compiler.impl.lockExclusive();
+    auto brandScope = kj::refcounted<BrandScope>(ErrorIgnorer::instance, node.getId(), 0, node);
+    Resolver::ResolvedDecl decl { node.getId(), 0, 0, node.getKind(), &node, nullptr };
+    newDecl.set(lock, BrandedDecl(kj::mv(decl), kj::mv(brandScope), {}));
+  }
+
+  return CompiledType(compiler, kj::mv(newDecl));
+}
+
+kj::Maybe<Compiler::CompiledType> Compiler::ModuleScope::evalType(
+    Expression::Reader expression, ErrorReporter& errorReporter) {
+  kj::ExternalMutexGuarded<BrandedDecl> newDecl;
+  bool found = false;
+
+  {
+    auto lock = compiler.impl.lockExclusive();
+    auto brandScope = kj::refcounted<BrandScope>(errorReporter, node.getId(), 0, node);
+    KJ_IF_MAYBE(result, brandScope->compileDeclExpression(
+        expression, node, ImplicitParams::none())) {
+      newDecl.set(lock, kj::mv(*result));
+      found = true;
+    };
+  }
+
+  if (found) {
+    return CompiledType(compiler, kj::mv(newDecl));
+  } else {
+    return nullptr;
+  }
 }
 
 }  // namespace compiler

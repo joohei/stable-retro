@@ -128,7 +128,7 @@ tests/test-*
 lib*.a
 *.app
 *_autogen
-*.capnp.*
+src/*.capnp.*
 retro/cores/*-version
 retro/cores/*.json
 
@@ -139,7 +139,3 @@ Temporary
 
 # VSCode config
 /.vscode/
-
-# cibuildwheel
-wheelhouse
-tests/test_cibuildwheel/tmp_dockerfiles

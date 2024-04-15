@@ -19,19 +19,13 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 // THE SOFTWARE.
 
-#ifndef CAPNP_LIST_H_
-#define CAPNP_LIST_H_
-
-#if defined(__GNUC__) && !defined(CAPNP_HEADER_WARNINGS)
-#pragma GCC system_header
-#endif
+#pragma once
 
 #include "layout.h"
 #include "orphan.h"
 #include <initializer_list>
-#ifdef KJ_STD_COMPAT
-#include <iterator>
-#endif  // KJ_STD_COMPAT
+
+CAPNP_BEGIN_HEADER
 
 namespace capnp {
 namespace _ {  // private
@@ -52,6 +46,8 @@ private:
   T value;
 };
 
+// By default this isn't compatible with STL algorithms. To add STL support either define
+// KJ_STD_COMPAT at the top of your compilation unit or include capnp/compat/std-iterator.h.
 template <typename Container, typename Element>
 class IndexingIterator {
 public:
@@ -123,6 +119,10 @@ struct List<T, Kind::PRIMITIVE> {
     typedef _::IndexingIterator<const Reader, T> Iterator;
     inline Iterator begin() const { return Iterator(this, 0); }
     inline Iterator end() const { return Iterator(this, size()); }
+
+    inline MessageSize totalSize() const {
+      return reader.totalSize().asPublic();
+    }
 
   private:
     _::ListReader reader;
@@ -219,6 +219,10 @@ struct List<T, Kind::STRUCT> {
     typedef _::IndexingIterator<const Reader, typename T::Reader> Iterator;
     inline Iterator begin() const { return Iterator(this, 0); }
     inline Iterator end() const { return Iterator(this, size()); }
+
+    inline MessageSize totalSize() const {
+      return reader.totalSize().asPublic();
+    }
 
   private:
     _::ListReader reader;
@@ -343,6 +347,10 @@ struct List<List<T>, Kind::LIST> {
     inline Iterator begin() const { return Iterator(this, 0); }
     inline Iterator end() const { return Iterator(this, size()); }
 
+    inline MessageSize totalSize() const {
+      return reader.totalSize().asPublic();
+    }
+
   private:
     _::ListReader reader;
     template <typename U, Kind K>
@@ -388,13 +396,13 @@ struct List<List<T>, Kind::LIST> {
         l.set(i++, element);
       }
     }
-    inline void adopt(uint index, Orphan<T>&& value) {
+    inline void adopt(uint index, Orphan<List<T>>&& value) {
       KJ_IREQUIRE(index < size());
       builder.getPointerElement(bounded(index) * ELEMENTS).adopt(kj::mv(value.builder));
     }
-    inline Orphan<T> disown(uint index) {
+    inline Orphan<List<T>> disown(uint index) {
       KJ_IREQUIRE(index < size());
-      return Orphan<T>(builder.getPointerElement(bounded(index) * ELEMENTS).disown());
+      return Orphan<List<T>>(builder.getPointerElement(bounded(index) * ELEMENTS).disown());
     }
 
     typedef _::IndexingIterator<Builder, typename List<T>::Builder> Iterator;
@@ -451,6 +459,10 @@ struct List<T, Kind::BLOB> {
     typedef _::IndexingIterator<const Reader, typename T::Reader> Iterator;
     inline Iterator begin() const { return Iterator(this, 0); }
     inline Iterator end() const { return Iterator(this, size()); }
+
+    inline MessageSize totalSize() const {
+      return reader.totalSize().asPublic();
+    }
 
   private:
     _::ListReader reader;
@@ -534,13 +546,7 @@ private:
 }  // namespace capnp
 
 #ifdef KJ_STD_COMPAT
-namespace std {
-
-template <typename Container, typename Element>
-struct iterator_traits<capnp::_::IndexingIterator<Container, Element>>
-      : public std::iterator<std::random_access_iterator_tag, Element, int> {};
-
-}  // namespace std
+#include "compat/std-iterator.h"
 #endif  // KJ_STD_COMPAT
 
-#endif  // CAPNP_LIST_H_
+CAPNP_END_HEADER

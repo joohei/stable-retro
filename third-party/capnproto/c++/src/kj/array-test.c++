@@ -378,5 +378,142 @@ TEST(Array, ReleaseAsBytesOrChars) {
   }
 }
 
+#if __cplusplus > 201402L
+KJ_TEST("kj::arr()") {
+  kj::Array<kj::String> array = kj::arr(kj::str("foo"), kj::str(123));
+  KJ_EXPECT(array == kj::ArrayPtr<const kj::StringPtr>({"foo", "123"}));
+}
+
+struct ImmovableInt {
+  ImmovableInt(int i): i(i) {}
+  KJ_DISALLOW_COPY(ImmovableInt);
+  int i;
+};
+
+KJ_TEST("kj::arrOf()") {
+  kj::Array<ImmovableInt> array = kj::arrOf<ImmovableInt>(123, 456, 789);
+  KJ_ASSERT(array.size() == 3);
+  KJ_EXPECT(array[0].i == 123);
+  KJ_EXPECT(array[1].i == 456);
+  KJ_EXPECT(array[2].i == 789);
+}
+#endif
+
+struct DestructionOrderRecorder {
+  DestructionOrderRecorder(uint& counter, uint& recordTo)
+      : counter(counter), recordTo(recordTo) {}
+  ~DestructionOrderRecorder() {
+    recordTo = ++counter;
+  }
+
+  uint& counter;
+  uint& recordTo;
+};
+
+TEST(Array, Attach) {
+  uint counter = 0;
+  uint destroyed1 = 0;
+  uint destroyed2 = 0;
+  uint destroyed3 = 0;
+
+  auto obj1 = kj::heap<DestructionOrderRecorder>(counter, destroyed1);
+  auto obj2 = kj::heap<DestructionOrderRecorder>(counter, destroyed2);
+  auto obj3 = kj::heap<DestructionOrderRecorder>(counter, destroyed3);
+
+  auto builder = kj::heapArrayBuilder<Own<DestructionOrderRecorder>>(1);
+  builder.add(kj::mv(obj1));
+  auto arr = builder.finish();
+  auto ptr = arr.begin();
+
+  Array<Own<DestructionOrderRecorder>> combined = arr.attach(kj::mv(obj2), kj::mv(obj3));
+
+  KJ_EXPECT(combined.begin() == ptr);
+
+  KJ_EXPECT(obj1.get() == nullptr);
+  KJ_EXPECT(obj2.get() == nullptr);
+  KJ_EXPECT(obj3.get() == nullptr);
+  KJ_EXPECT(destroyed1 == 0);
+  KJ_EXPECT(destroyed2 == 0);
+  KJ_EXPECT(destroyed3 == 0);
+
+  combined = nullptr;
+
+  KJ_EXPECT(destroyed1 == 1, destroyed1);
+  KJ_EXPECT(destroyed2 == 2, destroyed2);
+  KJ_EXPECT(destroyed3 == 3, destroyed3);
+}
+
+TEST(Array, AttachNested) {
+  uint counter = 0;
+  uint destroyed1 = 0;
+  uint destroyed2 = 0;
+  uint destroyed3 = 0;
+
+  auto obj1 = kj::heap<DestructionOrderRecorder>(counter, destroyed1);
+  auto obj2 = kj::heap<DestructionOrderRecorder>(counter, destroyed2);
+  auto obj3 = kj::heap<DestructionOrderRecorder>(counter, destroyed3);
+
+  auto builder = kj::heapArrayBuilder<Own<DestructionOrderRecorder>>(1);
+  builder.add(kj::mv(obj1));
+  auto arr = builder.finish();
+  auto ptr = arr.begin();
+
+  Array<Own<DestructionOrderRecorder>> combined = arr.attach(kj::mv(obj2)).attach(kj::mv(obj3));
+
+  KJ_EXPECT(combined.begin() == ptr);
+  KJ_EXPECT(combined.size() == 1);
+
+  KJ_EXPECT(obj1.get() == nullptr);
+  KJ_EXPECT(obj2.get() == nullptr);
+  KJ_EXPECT(obj3.get() == nullptr);
+  KJ_EXPECT(destroyed1 == 0);
+  KJ_EXPECT(destroyed2 == 0);
+  KJ_EXPECT(destroyed3 == 0);
+
+  combined = nullptr;
+
+  KJ_EXPECT(destroyed1 == 1, destroyed1);
+  KJ_EXPECT(destroyed2 == 2, destroyed2);
+  KJ_EXPECT(destroyed3 == 3, destroyed3);
+}
+
+TEST(Array, AttachFromArrayPtr) {
+  uint counter = 0;
+  uint destroyed1 = 0;
+  uint destroyed2 = 0;
+  uint destroyed3 = 0;
+
+  auto obj1 = kj::heap<DestructionOrderRecorder>(counter, destroyed1);
+  auto obj2 = kj::heap<DestructionOrderRecorder>(counter, destroyed2);
+  auto obj3 = kj::heap<DestructionOrderRecorder>(counter, destroyed3);
+
+  auto builder = kj::heapArrayBuilder<Own<DestructionOrderRecorder>>(1);
+  builder.add(kj::mv(obj1));
+  auto arr = builder.finish();
+  auto ptr = arr.begin();
+
+  Array<Own<DestructionOrderRecorder>> combined =
+      arr.asPtr().attach(kj::mv(obj2)).attach(kj::mv(obj3));
+  KJ_EXPECT(arr != nullptr);
+
+  KJ_EXPECT(combined.begin() == ptr);
+
+  KJ_EXPECT(obj1.get() == nullptr);
+  KJ_EXPECT(obj2.get() == nullptr);
+  KJ_EXPECT(obj3.get() == nullptr);
+  KJ_EXPECT(destroyed1 == 0);
+  KJ_EXPECT(destroyed2 == 0);
+  KJ_EXPECT(destroyed3 == 0);
+
+  combined = nullptr;
+
+  KJ_EXPECT(destroyed2 == 1, destroyed2);
+  KJ_EXPECT(destroyed3 == 2, destroyed3);
+
+  arr = nullptr;
+
+  KJ_EXPECT(destroyed1 == 3, destroyed1);
+}
+
 }  // namespace
 }  // namespace kj
