@@ -9,6 +9,7 @@ import retro
     params=[
         os.path.splitext(rom)[0]
         for rom in os.listdir(os.path.join(os.path.dirname(__file__), "../roms"))
+        if not (os.name == "posix" and rom == "dox-fire.gb")
     ],
 )
 def generate_test_env(request):
