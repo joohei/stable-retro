@@ -27,19 +27,19 @@ struct EmulatorTestParamName {
 };
 
 void EmulatorTest::SetUp() {
-	for (const string& core : { "fceumm", "gambatte", "genesis_plus_gx", "mednafen_pce_fast", "mgba", "snes9x", "stella", "picodrive" }) {
-	    printf("Loading core %s\n", core.c_str());
-		ifstream in("../retro/cores/" + core + ".json");
-		ostringstream out;
-		Retro::corePath("../retro/cores");
-		while (!in.eof()) {
-			string line;
-			in >> line;
-			out << line;
-			printf("%s\n", line.c_str());
-		}
-		Retro::loadCoreInfo(out.str().c_str());
-	}
+    for (const string& core : { "fceumm", "gambatte", "genesis_plus_gx", "mednafen_pce_fast", "mgba", "snes9x", "stella", "picodrive" }) {
+        ifstream in("../retro/cores/" + core + ".json");
+        if (!in) {
+            continue;
+        }
+        ostringstream out;
+        Retro::corePath("../retro/cores");
+        string line;
+        while (getline(in, line)) {
+            out << line;
+        }
+        Retro::loadCoreInfo(out.str().c_str());
+    }
 }
 
 namespace Retro {
