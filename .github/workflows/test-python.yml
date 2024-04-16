@@ -111,7 +111,7 @@ jobs:
         run: |
           export SETUPTOOLS_USE_DISTUTILS=stdlib
           python3 -m pip install -U pip
-          pip install -U setuptools wheel pytest numpy==1.25.2
+          pip install -U setuptools wheel pytest numpy
           pip install -e .
 
       - name: Set up headless display
@@ -133,7 +133,7 @@ jobs:
       - name: Set up environment
         run: |
           brew update
-          brew install cmake libzip
+          brew install cmake freeglut libzip
 
       - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@v2
