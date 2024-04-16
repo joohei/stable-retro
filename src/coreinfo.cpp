@@ -34,18 +34,14 @@ string libForCore(const string& core) {
 }
 
 string coreForRom(const string& rom) {
-    printf("coreForRom: %s\n", rom.c_str());
 	size_t dot = rom.find_last_of('.');
-	printf("dot: %d\n", dot);
 	if (dot == string::npos) {
 		return {};
 	}
 	string extName = rom.substr(dot + 1);
-	printf("extName: %s\n", extName.c_str());
 	if (s_extensionToCore.find(extName) == s_extensionToCore.end()) {
 		return {};
 	}
-	printf("core: %s\n", s_extensionToCore[extName].c_str());
 	return s_extensionToCore[extName];
 }
 

@@ -78,14 +78,10 @@ bool Emulator::loadRom(const string& romPath) {
 		unloadRom();
 	}
 
-    printf("Loading rom %s\n", romPath.c_str());
-
 	auto core = coreForRom(romPath);
 	if (core.size() == 0) {
 		return false;
 	}
-
-	printf("Core: %s\n", core.c_str());
 
 	if (m_coreHandle && m_core != core) {
 		unloadCore();
@@ -192,12 +188,9 @@ void Emulator::unloadCore() {
 }
 
 void Emulator::unloadRom() {
-    printf("Unloading rom\n");
-    printf("Rom loaded: %d\n", m_romLoaded);
 	if (!m_romLoaded) {
 		return;
 	}
-	printf("Unloading game\n");
 	retro_unload_game();
 	m_romLoaded = false;
 	m_romPath.clear();

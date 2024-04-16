@@ -28,6 +28,7 @@ struct EmulatorTestParamName {
 
 void EmulatorTest::SetUp() {
 	for (const string& core : { "fceumm", "gambatte", "genesis_plus_gx", "mednafen_pce_fast", "mgba", "snes9x", "stella", "picodrive" }) {
+	    printf("Loading core %s\n", core.c_str());
 		ifstream in("../retro/cores/" + core + ".json");
 		ostringstream out;
 		Retro::corePath("../retro/cores");
@@ -35,6 +36,7 @@ void EmulatorTest::SetUp() {
 			string line;
 			in >> line;
 			out << line;
+			printf("%s\n", line.c_str());
 		}
 		Retro::loadCoreInfo(out.str().c_str());
 	}
@@ -44,15 +46,11 @@ namespace Retro {
 
 TEST_F(EmulatorTest, Create) {
 	{
-	    printf("Creating emulator\n");
 		Emulator e;
-		printf("Emulator created\n");
 		EXPECT_FALSE(e.loadRom(""));
 	}
 	{
-	    printf("Creating emulator\n");
 		Emulator f;
-		printf("Emulator created\n");
 		EXPECT_FALSE(f.loadRom(""));
 	}
 }
