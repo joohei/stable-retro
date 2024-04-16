@@ -44,11 +44,15 @@ namespace Retro {
 
 TEST_F(EmulatorTest, Create) {
 	{
+	    printf("Creating emulator\n");
 		Emulator e;
+		printf("Emulator created\n");
 		EXPECT_FALSE(e.loadRom(""));
 	}
 	{
+	    printf("Creating emulator\n");
 		Emulator f;
+		printf("Emulator created\n");
 		EXPECT_FALSE(f.loadRom(""));
 	}
 }
