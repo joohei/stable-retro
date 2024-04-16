@@ -213,14 +213,15 @@ add_core(atari2600 stella)
 
 if(APPLE)
   message(WARNING "Detected Apple, skipping gambatte (gb)")
+  message(WARNING "Detected Apple, skipping mednafen_saturn (saturn) to speed up build for debugging")
 else()
   add_core(gb gambatte)
+  add_core(saturn mednafen_saturn)
 endif()
 
 add_core(gba mgba)
 add_core(pce mednafen_pce_fast)
 add_core(32x picodrive)
-add_core(saturn mednafen_saturn)
 
 set(CLEAN_CORES)
 
