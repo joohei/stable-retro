@@ -1,7 +1,7 @@
 /*
  * Copyright (C) 2013 - Hans-Kristian Arntzen
  *
- * Permission is hereby granted, free of charge,
+ * Permission is hereby granted, free of charge, 
  * to any person obtaining a copy of this software and
  * associated documentation files (the "Software"),
  * to deal in the Software without restriction,
@@ -25,9 +25,9 @@
  */
 
 #include "blipper.h"
+#include "gambatte_log.h"
 
 #include <stdlib.h>
-#include <stdio.h>
 #include <string.h>
 #include <math.h>
 
@@ -71,7 +71,9 @@ void blipper_free(blipper_t *blip)
    if (blip)
    {
 #if BLIPPER_LOG_PERFORMANCE
-      fprintf(stderr, "[blipper]: Processed %lu samples, using %.6f seconds blipping and %.6f seconds integrating.\n", blip->total_samples, blip->total_time, blip->integrator_time);
+      gambatte_log(RETRO_LOG_INFO,
+            "<blipper> Processed %lu samples, using %.6f seconds blipping and %.6f seconds integrating.\n",
+            blip->total_samples, blip->total_time, blip->integrator_time);
 #endif
 
       if (blip->owns_filter)
@@ -312,13 +314,13 @@ blipper_t *blipper_new(unsigned taps, double cutoff, double beta,
    /* Sanity check. Not strictly required to be supported in C. */
    if ((-3 >> 2) != -1)
    {
-      fprintf(stderr, "Integer right shift not supported.\n");
+      gambatte_log(RETRO_LOG_ERROR, "<blipper> Integer right shift not supported.\n");
       return NULL;
    }
 
    if ((decimation & (decimation - 1)) != 0)
    {
-      fprintf(stderr, "[blipper]: Decimation factor must be POT.\n");
+      gambatte_log(RETRO_LOG_ERROR, "<blipper> Decimation factor must be POT.\n");
       return NULL;
    }
 
@@ -472,3 +474,4 @@ void blipper_read(blipper_t *blip, blipper_sample_t *output, unsigned samples,
    blip->integrator_time += get_time() - t0;
 #endif
 }
+

@@ -1,4 +1,4 @@
-/* Copyright  (C) 2010-2017 The RetroArch team
+/* Copyright  (C) 2010-2020 The RetroArch team
  *
  * ---------------------------------------------------------------------------------------
  * The following license statement only applies to this file (retro_common_api.h).
@@ -75,19 +75,31 @@ typedef int ssize_t;
 #include <sys/types.h>
 #endif
 
-#ifdef _WIN32
-#define STRING_REP_INT64  "%I64u"
-#define STRING_REP_UINT64 "%I64u"
-#define STRING_REP_ULONG  "%Iu"
-#elif defined(__STDC_VERSION__) && __STDC_VERSION__>=199901L && !defined(VITA)
-#define STRING_REP_INT64  "%llu"
-#define STRING_REP_UINT64 "%llu"
-#define STRING_REP_ULONG  "%zu"
+#ifdef _MSC_VER
+#if _MSC_VER >= 1800
+#include <inttypes.h>
 #else
-#define STRING_REP_INT64  "%llu"
-#define STRING_REP_UINT64 "%llu"
-#define STRING_REP_ULONG  "%lu"
+#ifndef PRId64
+#define PRId64 "I64d"
+#define PRIu64 "I64u"
+#define PRIuPTR "Iu"
 #endif
+#endif
+#else
+/* C++11 says this one isn't needed, but apparently (some versions of) mingw require it anyways */
+/* https://stackoverflow.com/questions/8132399/how-to-printf-uint64-t-fails-with-spurious-trailing-in-format */
+/* https://github.com/libretro/RetroArch/issues/6009 */
+#ifndef __STDC_FORMAT_MACROS
+#define __STDC_FORMAT_MACROS 1
+#endif
+#include <inttypes.h>
+#endif
+#ifndef PRId64
+#error "inttypes.h is being screwy"
+#endif
+#define STRING_REP_INT64 "%" PRId64
+#define STRING_REP_UINT64 "%" PRIu64
+#define STRING_REP_USIZE "%" PRIuPTR
 
 /*
 I would like to see retro_inline.h moved in here; possibly boolean too.
@@ -102,7 +114,6 @@ then you should pay the price everywhere, so you can see how much grief it will 
 Of course, another school of thought is that you should do as little damage as possible
 in as few places as possible...
 */
-
 
 /* _LIBRETRO_COMMON_RETRO_COMMON_API_H */
 #endif

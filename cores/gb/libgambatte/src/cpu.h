@@ -50,6 +50,8 @@ public:
    void *vram_ptr() const { return mem_.vram_ptr(); }
    void *rambank0_ptr() const { return mem_.rambank0_ptr(); }
    void *rambank1_ptr() const { return mem_.rambank1_ptr(); }
+   void *rambank2_ptr() const { return mem_.rambank2_ptr(); }
+   void *bankedram_ptr() const { return mem_.bankedram_ptr(); }
    void *rombank0_ptr() const { return mem_.rombank0_ptr(); }
    void *rombank1_ptr() const { return mem_.rombank1_ptr(); }
    void *zeropage_ptr() const { return mem_.zeropage_ptr(); }
@@ -84,7 +86,7 @@ public:
 #if 0
 	bool loaded() const { return mem_.loaded(); }
 #endif
-	void setSoundBuffer(uint_least32_t *buf) { mem_.setSoundBuffer(buf); }
+	void setSoundBuffer(uint_least32_t *buf, std::size_t size) { mem_.setSoundBuffer(buf, size); }
 	std::size_t fillSoundBuffer() { return mem_.fillSoundBuffer(cycleCounter_); }
 	bool isCgb() const { return mem_.isCgb(); }
 

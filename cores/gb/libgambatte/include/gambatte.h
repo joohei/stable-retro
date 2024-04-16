@@ -28,7 +28,7 @@
 #include <cstddef>
 
 namespace gambatte {
-#ifdef VIDEO_RGB565
+#if defined(VIDEO_RGB565) || defined(VIDEO_ABGR1555)
 typedef uint16_t video_pixel_t;
 #else
 typedef uint_least32_t video_pixel_t;
@@ -39,21 +39,23 @@ class GB {
 public:
 	GB();
 	~GB();
-
+	
 	enum LoadFlag {
       FORCE_DMG        = 1, /**< Treat the ROM as not having CGB support regardless of what its header advertises. */
       GBA_CGB          = 2, /**< Use GBA intial CPU register values when in CGB mode. */
       MULTICART_COMPAT = 4,  /**< Use heuristics to detect and support some multicart MBCs disguised as MBC1. */
       FORCE_CGB        = 8
 	};
-
+	
    int load(const void *romdata, unsigned size, unsigned flags = 0);
-
+	
 	/** Emulates until at least 'samples' stereo sound samples are produced in the supplied buffer,
 	  * or until a video frame has been drawn.
 	  *
 	  * There are 35112 stereo sound samples in a video frame.
 	  * May run for uptil 2064 stereo samples too long.
+	  * EDIT: Due to internal emulator bugs, may in fact run for
+	  *       an arbitrary number of samples...
 	  * A stereo sample consists of two native endian 2s complement 16-bit PCM samples,
 	  * with the left sample preceding the right one. Usually casting soundBuf to/from
 	  * short* is OK and recommended. The reason for not using a short* in the interface
@@ -67,17 +69,18 @@ public:
 	  * @param videoBuf 160x144 RGB32 (native endian) video frame buffer or 0
 	  * @param pitch distance in number of pixels (not bytes) from the start of one line to the next in videoBuf.
 	  * @param soundBuf buffer with space >= samples + 2064
+	  * @param soundBufSize actual size of soundBuf buffer
 	  * @param samples in: number of stereo samples to produce, out: actual number of samples produced
 	  * @return sample number at which the video frame was produced. -1 means no frame was produced.
 	  */
 	long runFor(gambatte::video_pixel_t *videoBuf, int pitch,
-			gambatte::uint_least32_t *soundBuf, unsigned &samples);
-
+			gambatte::uint_least32_t *soundBuf, std::size_t soundBufSize, unsigned &samples);
+	
 	/** Reset to initial state.
 	  * Equivalent to reloading a ROM image, or turning a Game Boy Color off and on again.
 	  */
 	void reset();
-
+	
 	/** @param palNum 0 <= palNum < 3. One of BG_PALETTE, SP1_PALETTE and SP2_PALETTE.
 	  * @param colorNum 0 <= colorNum < 4
 	  */
@@ -85,7 +88,7 @@ public:
 
 	/** Sets the callback used for getting input state. */
 	void setInputGetter(InputGetter *getInput);
-
+   
    /** Sets the callback used for getting the bootloader data. */
    void setBootloaderGetter(bool (*getter)(void *userdata, bool isgbc, uint8_t *data, uint32_t buf_size));
 
@@ -93,7 +96,7 @@ public:
 	/** Sets the callback used for transferring serial data. */
 	void setSerialIO(SerialIO *serial_io);
 #endif
-
+	
 	/** Sets the directory used for storing save data. The default is the same directory as the ROM Image file. */
 	void setSaveDir(const std::string &sdir);
 
@@ -101,18 +104,21 @@ public:
    unsigned savedata_size();
    void *rtcdata_ptr();
    unsigned rtcdata_size();
-
+	
 	/** Returns true if the currently loaded ROM image is treated as having CGB support. */
 	bool isCgb() const;
-
+	
 	/** Returns true if a ROM image is loaded. */
 	bool isLoaded() const;
-
+	
    void saveState(void *data);
    void loadState(const void *data);
    size_t stateSize() const;
 
    void setColorCorrection(bool enable);
+   void setColorCorrectionMode(unsigned colorCorrectionMode);
+   void setColorCorrectionBrightness(float colorCorrectionBrightness);
+   void setDarkFilterLevel(unsigned darkFilterLevel);
    video_pixel_t gbcToRgb32(const unsigned bgr15);
 
    /** Set Game Genie codes to apply to currently loaded ROM image. Cleared on ROM load.
@@ -126,11 +132,13 @@ public:
    void setGameShark(const std::string &codes);
 
    void clearCheats();
-
+   
 #ifdef __LIBRETRO__
    void *vram_ptr() const;
    void *rambank0_ptr() const;
    void *rambank1_ptr() const;
+   void *rambank2_ptr() const;
+   void *bankedram_ptr() const;
    void *rombank0_ptr() const;
    void *rombank1_ptr() const;
    void *zeropage_ptr() const;

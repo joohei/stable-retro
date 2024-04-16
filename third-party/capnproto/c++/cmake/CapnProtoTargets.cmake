@@ -7,7 +7,7 @@ if(CMAKE_VERSION VERSION_LESS "2.8.3")
    message(FATAL_ERROR "CMake >= 2.8.3 required")
 endif()
 cmake_policy(PUSH)
-cmake_policy(VERSION 2.8.3...3.24)
+cmake_policy(VERSION 2.8.3...3.27)
 #----------------------------------------------------------------
 # Generated CMake target import file.
 #----------------------------------------------------------------
@@ -51,7 +51,7 @@ add_library(CapnProto::kj STATIC IMPORTED)
 
 set_target_properties(CapnProto::kj PROPERTIES
   INTERFACE_COMPILE_FEATURES "cxx_generic_lambdas"
-  INTERFACE_INCLUDE_DIRECTORIES "C:/Users/joona/Documents/GitHub/stable-retro/third-party/capnproto/c++/src"
+  INTERFACE_INCLUDE_DIRECTORIES "C:/msys64/home/joona/stable-retro/third-party/capnproto/c++/src"
 )
 
 # Create imported target CapnProto::kj-test
@@ -94,7 +94,7 @@ set_target_properties(CapnProto::kj-gzip PROPERTIES
 add_library(CapnProto::capnp STATIC IMPORTED)
 
 set_target_properties(CapnProto::capnp PROPERTIES
-  INTERFACE_INCLUDE_DIRECTORIES "C:/Users/joona/Documents/GitHub/stable-retro/third-party/capnproto/c++/src"
+  INTERFACE_INCLUDE_DIRECTORIES "C:/msys64/home/joona/stable-retro/third-party/capnproto/c++/src"
   INTERFACE_LINK_LIBRARIES "CapnProto::kj"
 )
 
@@ -139,95 +139,95 @@ add_executable(CapnProto::capnpc_capnp IMPORTED)
 set_property(TARGET CapnProto::kj APPEND PROPERTY IMPORTED_CONFIGURATIONS RELWITHDEBINFO)
 set_target_properties(CapnProto::kj PROPERTIES
   IMPORTED_LINK_INTERFACE_LANGUAGES_RELWITHDEBINFO "CXX"
-  IMPORTED_LOCATION_RELWITHDEBINFO "C:/Users/joona/Documents/GitHub/stable-retro/third-party/capnproto/c++/src/kj/libkj.a"
+  IMPORTED_LOCATION_RELWITHDEBINFO "C:/msys64/home/joona/stable-retro/third-party/capnproto/c++/src/kj/libkj.a"
   )
 
 # Import target "CapnProto::kj-test" for configuration "RelWithDebInfo"
 set_property(TARGET CapnProto::kj-test APPEND PROPERTY IMPORTED_CONFIGURATIONS RELWITHDEBINFO)
 set_target_properties(CapnProto::kj-test PROPERTIES
   IMPORTED_LINK_INTERFACE_LANGUAGES_RELWITHDEBINFO "CXX"
-  IMPORTED_LOCATION_RELWITHDEBINFO "C:/Users/joona/Documents/GitHub/stable-retro/third-party/capnproto/c++/src/kj/libkj-test.a"
+  IMPORTED_LOCATION_RELWITHDEBINFO "C:/msys64/home/joona/stable-retro/third-party/capnproto/c++/src/kj/libkj-test.a"
   )
 
 # Import target "CapnProto::kj-async" for configuration "RelWithDebInfo"
 set_property(TARGET CapnProto::kj-async APPEND PROPERTY IMPORTED_CONFIGURATIONS RELWITHDEBINFO)
 set_target_properties(CapnProto::kj-async PROPERTIES
   IMPORTED_LINK_INTERFACE_LANGUAGES_RELWITHDEBINFO "CXX"
-  IMPORTED_LOCATION_RELWITHDEBINFO "C:/Users/joona/Documents/GitHub/stable-retro/third-party/capnproto/c++/src/kj/libkj-async.a"
+  IMPORTED_LOCATION_RELWITHDEBINFO "C:/msys64/home/joona/stable-retro/third-party/capnproto/c++/src/kj/libkj-async.a"
   )
 
 # Import target "CapnProto::kj-http" for configuration "RelWithDebInfo"
 set_property(TARGET CapnProto::kj-http APPEND PROPERTY IMPORTED_CONFIGURATIONS RELWITHDEBINFO)
 set_target_properties(CapnProto::kj-http PROPERTIES
   IMPORTED_LINK_INTERFACE_LANGUAGES_RELWITHDEBINFO "CXX"
-  IMPORTED_LOCATION_RELWITHDEBINFO "C:/Users/joona/Documents/GitHub/stable-retro/third-party/capnproto/c++/src/kj/libkj-http.a"
+  IMPORTED_LOCATION_RELWITHDEBINFO "C:/msys64/home/joona/stable-retro/third-party/capnproto/c++/src/kj/libkj-http.a"
   )
 
 # Import target "CapnProto::kj-tls" for configuration "RelWithDebInfo"
 set_property(TARGET CapnProto::kj-tls APPEND PROPERTY IMPORTED_CONFIGURATIONS RELWITHDEBINFO)
 set_target_properties(CapnProto::kj-tls PROPERTIES
   IMPORTED_LINK_INTERFACE_LANGUAGES_RELWITHDEBINFO "CXX"
-  IMPORTED_LOCATION_RELWITHDEBINFO "C:/Users/joona/Documents/GitHub/stable-retro/third-party/capnproto/c++/src/kj/libkj-tls.a"
+  IMPORTED_LOCATION_RELWITHDEBINFO "C:/msys64/home/joona/stable-retro/third-party/capnproto/c++/src/kj/libkj-tls.a"
   )
 
 # Import target "CapnProto::kj-gzip" for configuration "RelWithDebInfo"
 set_property(TARGET CapnProto::kj-gzip APPEND PROPERTY IMPORTED_CONFIGURATIONS RELWITHDEBINFO)
 set_target_properties(CapnProto::kj-gzip PROPERTIES
   IMPORTED_LINK_INTERFACE_LANGUAGES_RELWITHDEBINFO "CXX"
-  IMPORTED_LOCATION_RELWITHDEBINFO "C:/Users/joona/Documents/GitHub/stable-retro/third-party/capnproto/c++/src/kj/libkj-gzip.a"
+  IMPORTED_LOCATION_RELWITHDEBINFO "C:/msys64/home/joona/stable-retro/third-party/capnproto/c++/src/kj/libkj-gzip.a"
   )
 
 # Import target "CapnProto::capnp" for configuration "RelWithDebInfo"
 set_property(TARGET CapnProto::capnp APPEND PROPERTY IMPORTED_CONFIGURATIONS RELWITHDEBINFO)
 set_target_properties(CapnProto::capnp PROPERTIES
   IMPORTED_LINK_INTERFACE_LANGUAGES_RELWITHDEBINFO "CXX"
-  IMPORTED_LOCATION_RELWITHDEBINFO "C:/Users/joona/Documents/GitHub/stable-retro/third-party/capnproto/c++/src/capnp/libcapnp.a"
+  IMPORTED_LOCATION_RELWITHDEBINFO "C:/msys64/home/joona/stable-retro/third-party/capnproto/c++/src/capnp/libcapnp.a"
   )
 
 # Import target "CapnProto::capnp-rpc" for configuration "RelWithDebInfo"
 set_property(TARGET CapnProto::capnp-rpc APPEND PROPERTY IMPORTED_CONFIGURATIONS RELWITHDEBINFO)
 set_target_properties(CapnProto::capnp-rpc PROPERTIES
   IMPORTED_LINK_INTERFACE_LANGUAGES_RELWITHDEBINFO "CXX"
-  IMPORTED_LOCATION_RELWITHDEBINFO "C:/Users/joona/Documents/GitHub/stable-retro/third-party/capnproto/c++/src/capnp/libcapnp-rpc.a"
+  IMPORTED_LOCATION_RELWITHDEBINFO "C:/msys64/home/joona/stable-retro/third-party/capnproto/c++/src/capnp/libcapnp-rpc.a"
   )
 
 # Import target "CapnProto::capnp-json" for configuration "RelWithDebInfo"
 set_property(TARGET CapnProto::capnp-json APPEND PROPERTY IMPORTED_CONFIGURATIONS RELWITHDEBINFO)
 set_target_properties(CapnProto::capnp-json PROPERTIES
   IMPORTED_LINK_INTERFACE_LANGUAGES_RELWITHDEBINFO "CXX"
-  IMPORTED_LOCATION_RELWITHDEBINFO "C:/Users/joona/Documents/GitHub/stable-retro/third-party/capnproto/c++/src/capnp/libcapnp-json.a"
+  IMPORTED_LOCATION_RELWITHDEBINFO "C:/msys64/home/joona/stable-retro/third-party/capnproto/c++/src/capnp/libcapnp-json.a"
   )
 
 # Import target "CapnProto::capnp-websocket" for configuration "RelWithDebInfo"
 set_property(TARGET CapnProto::capnp-websocket APPEND PROPERTY IMPORTED_CONFIGURATIONS RELWITHDEBINFO)
 set_target_properties(CapnProto::capnp-websocket PROPERTIES
   IMPORTED_LINK_INTERFACE_LANGUAGES_RELWITHDEBINFO "CXX"
-  IMPORTED_LOCATION_RELWITHDEBINFO "C:/Users/joona/Documents/GitHub/stable-retro/third-party/capnproto/c++/src/capnp/libcapnp-websocket.a"
+  IMPORTED_LOCATION_RELWITHDEBINFO "C:/msys64/home/joona/stable-retro/third-party/capnproto/c++/src/capnp/libcapnp-websocket.a"
   )
 
 # Import target "CapnProto::capnpc" for configuration "RelWithDebInfo"
 set_property(TARGET CapnProto::capnpc APPEND PROPERTY IMPORTED_CONFIGURATIONS RELWITHDEBINFO)
 set_target_properties(CapnProto::capnpc PROPERTIES
   IMPORTED_LINK_INTERFACE_LANGUAGES_RELWITHDEBINFO "CXX"
-  IMPORTED_LOCATION_RELWITHDEBINFO "C:/Users/joona/Documents/GitHub/stable-retro/third-party/capnproto/c++/src/capnp/libcapnpc.a"
+  IMPORTED_LOCATION_RELWITHDEBINFO "C:/msys64/home/joona/stable-retro/third-party/capnproto/c++/src/capnp/libcapnpc.a"
   )
 
 # Import target "CapnProto::capnp_tool" for configuration "RelWithDebInfo"
 set_property(TARGET CapnProto::capnp_tool APPEND PROPERTY IMPORTED_CONFIGURATIONS RELWITHDEBINFO)
 set_target_properties(CapnProto::capnp_tool PROPERTIES
-  IMPORTED_LOCATION_RELWITHDEBINFO "C:/Users/joona/Documents/GitHub/stable-retro/third-party/capnproto/c++/src/capnp/capnp.exe"
+  IMPORTED_LOCATION_RELWITHDEBINFO "C:/msys64/home/joona/stable-retro/third-party/capnproto/c++/src/capnp/capnp.exe"
   )
 
 # Import target "CapnProto::capnpc_cpp" for configuration "RelWithDebInfo"
 set_property(TARGET CapnProto::capnpc_cpp APPEND PROPERTY IMPORTED_CONFIGURATIONS RELWITHDEBINFO)
 set_target_properties(CapnProto::capnpc_cpp PROPERTIES
-  IMPORTED_LOCATION_RELWITHDEBINFO "C:/Users/joona/Documents/GitHub/stable-retro/third-party/capnproto/c++/src/capnp/capnpc-c++.exe"
+  IMPORTED_LOCATION_RELWITHDEBINFO "C:/msys64/home/joona/stable-retro/third-party/capnproto/c++/src/capnp/capnpc-c++.exe"
   )
 
 # Import target "CapnProto::capnpc_capnp" for configuration "RelWithDebInfo"
 set_property(TARGET CapnProto::capnpc_capnp APPEND PROPERTY IMPORTED_CONFIGURATIONS RELWITHDEBINFO)
 set_target_properties(CapnProto::capnpc_capnp PROPERTIES
-  IMPORTED_LOCATION_RELWITHDEBINFO "C:/Users/joona/Documents/GitHub/stable-retro/third-party/capnproto/c++/src/capnp/capnpc-capnp.exe"
+  IMPORTED_LOCATION_RELWITHDEBINFO "C:/msys64/home/joona/stable-retro/third-party/capnproto/c++/src/capnp/capnpc-capnp.exe"
   )
 
 # This file does not depend on other imported targets which have

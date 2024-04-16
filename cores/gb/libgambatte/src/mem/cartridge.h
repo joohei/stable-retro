@@ -21,6 +21,7 @@
 
 #include "memptrs.h"
 #include "rtc.h"
+#include "huc3.h"
 #include "savestate.h"
 #include <memory>
 #include <string>
@@ -32,9 +33,9 @@ namespace gambatte
    {
       public:
          virtual ~Mbc() {}
-         virtual void romWrite(unsigned P, unsigned data) = 0;
-         virtual void saveState(SaveState::Mem &ss) const = 0;
-         virtual void loadState(const SaveState::Mem &ss) = 0;
+         virtual void romWrite(unsigned P, unsigned data) {};
+         virtual void saveState(SaveState::Mem &ss) const {};
+         virtual void loadState(const SaveState::Mem &ss) {};
          virtual bool isAddressWithinAreaRombankCanBeMappedTo(unsigned address, unsigned rombank) const = 0;
    };
 
@@ -62,7 +63,7 @@ namespace gambatte
             return memptrs_.vramdata();
          }
 
-         unsigned char * romdata(unsigned area) const
+         unsigned char * romdata(unsigned area) const 
          {
             return memptrs_.romdata(area);
          }
@@ -123,16 +124,20 @@ namespace gambatte
             rtc_.write(data);
          }
 
-         unsigned char rtcRead() const
+         unsigned char rtcRead() const 
          {
             return *rtc_.getActive();
          }
-
+         
          const std::string saveBasePath() const;
          void setSaveDir(const std::string &dir);
          int loadROM(const void *romdata, unsigned int romsize, unsigned int forceModel, bool multicartCompat);
          void setGameGenie(const std::string &codes);
          void clearCheats();
+
+         bool isHuC3() const { return huc3_.isHuC3(); }
+         unsigned char HuC3Read(unsigned p, unsigned long const cc) { return huc3_.read(p, cc); }
+         void HuC3Write(unsigned p, unsigned data) { huc3_.write(p, data); }
 
          void *savedata_ptr();
          unsigned savedata_size();
@@ -152,6 +157,7 @@ namespace gambatte
          };
          MemPtrs memptrs_;
          Rtc rtc_;
+         HuC3Chip huc3_;
 
          std::auto_ptr<Mbc> mbc;
 

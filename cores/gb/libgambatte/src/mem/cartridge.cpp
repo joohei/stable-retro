@@ -19,10 +19,11 @@
 #include "cartridge.h"
 #include "../savestate.h"
 #include <cstring>
-#include <fstream>
-#include <stdio.h>
 #include <string.h>
 #include <algorithm>
+#include "gambatte_log.h"
+
+extern void cartridge_set_rumble(unsigned active);
 
 namespace gambatte
 {
@@ -344,11 +345,80 @@ namespace gambatte
          setRombank();
       }
    };
+   class HuC3 : public DefaultMbc {
+      MemPtrs &memptrs_;
+      HuC3Chip *const huc3_;
+      unsigned char rombank_;
+      unsigned char rambank_;
+      unsigned char ramflag_;
+      void setRambank() const {
+         huc3_->setRamflag(ramflag_);
+         unsigned flags;
+         if(ramflag_ >= 0x0B && ramflag_ < 0x0F) {
+            // System registers mode
+            flags = MemPtrs::READ_EN | MemPtrs::WRITE_EN | MemPtrs::RTC_EN;
+         }
+         else if(ramflag_ == 0x0A || ramflag_ > 0x0D) {
+            // Read/write mode
+            flags = MemPtrs::READ_EN | MemPtrs::WRITE_EN;
+         }
+         else {
+            // Read-only mode ??
+            flags = MemPtrs::READ_EN;
+         }
+         memptrs_.setRambank(flags, rambank_ & (rambanks(memptrs_) - 1));
+      }
+      void setRombank() const { memptrs_.setRombank(std::max(rombank_ & (rombanks(memptrs_) - 1), 1u)); }
+      public:
+      explicit HuC3(MemPtrs &memptrs, HuC3Chip *const huc3)
+         : memptrs_(memptrs),
+         huc3_(huc3),
+         rombank_(1),
+         rambank_(0),
+         ramflag_(0)
+      {
+      }
+      virtual void romWrite(unsigned const p, unsigned const data) {
+         switch (p >> 13 & 3) {
+         case 0:
+            ramflag_ = data;
+            //gambatte_log(RETRO_LOG_DEBUG, "<HuC3> set ramflag to %02X\n", data);
+            setRambank();
+            break;
+         case 1:
+            //gambatte_log(RETRO_LOG_DEBUG, "<HuC3> set rombank to %02X\n", data);
+            rombank_ = data;
+            setRombank();
+            break;
+         case 2:
+            //gambatte_log(RETRO_LOG_DEBUG, "<HuC3> set rambank to %02X\n", data);
+            rambank_ = data;
+            setRambank();
+            break;
+         case 3:
+            // GEST: "programs will write 1 here"
+            break;
+         }
+      }
+      virtual void saveState(SaveState::Mem &ss) const {
+         ss.rombank = rombank_;
+         ss.rambank = rambank_;
+         ss.HuC3RAMflag = ramflag_;
+      }
+      virtual void loadState(SaveState::Mem const &ss) {
+         rombank_ = ss.rombank;
+         rambank_ = ss.rambank;
+         ramflag_ = ss.HuC3RAMflag;
+         setRambank();
+         setRombank();
+      }
+   };
    class Mbc5 : public DefaultMbc {
       MemPtrs &memptrs;
       unsigned short rombank;
       unsigned char rambank;
       bool enableRam;
+      bool hasRumble;
       static unsigned adjustedRombank(const unsigned bank) { return bank; }
       void setRambank() const {
          memptrs.setRambank(enableRam ? MemPtrs::READ_EN | MemPtrs::WRITE_EN : 0,
@@ -356,29 +426,41 @@ namespace gambatte
       }
       void setRombank() const { memptrs.setRombank(adjustedRombank(rombank) & (rombanks(memptrs) - 1));}
       public:
-      explicit Mbc5(MemPtrs &memptrs)
+      explicit Mbc5(MemPtrs &memptrs, bool rumble)
          : memptrs(memptrs),
          rombank(1),
          rambank(0),
-         enableRam(false)
+         enableRam(false),
+         hasRumble(rumble)
       {
       }
       virtual void romWrite(const unsigned P, const unsigned data) {
-         switch (P >> 13 & 3) {
-            case 0:
+         switch (P >> 12 & 0x7) {
+            case 0x0:
+            case 0x1:
                enableRam = (data & 0xF) == 0xA;
                setRambank();
                break;
-            case 1:
+            case 0x2:
+            case 0x3:
                rombank = P < 0x3000 ? (rombank & 0x100) | data
                   : (data << 8 & 0x100) | (rombank & 0xFF);
                setRombank();
                break;
-            case 2:
-               rambank = data & 0xF;
+            case 0x4:
+            case 0x5:
+               if(hasRumble && ((P >> 12 & 0x7) == 4))
+               {
+                  cartridge_set_rumble((data >> 3) & 1);
+                  rambank = (data & ~8) & 0x0f;
+               }
+               else
+               {
+                  rambank = data & 0x0f;
+               }
                setRambank();
                break;
-            case 3:
+            default:
                break;
          }
       }
@@ -400,6 +482,7 @@ namespace gambatte
    {
       switch (headerByte0x147)
       {
+         case 0xFE: // huc3
          case 0x0F:
          case 0x10:
             return true;
@@ -419,10 +502,12 @@ namespace gambatte
    {
       mbc->saveState(state.mem);
       rtc_.saveState(state);
+      huc3_.saveState(state);
    }
 
    void Cartridge::loadState(const SaveState &state)
    {
+      huc3_.loadState(state);
       rtc_.loadState(state);
       mbc->loadState(state.mem);
    }
@@ -455,7 +540,8 @@ namespace gambatte
       unsigned rambanks = 1;
       unsigned rombanks = 2;
       bool cgb = false;
-      enum Cartridgetype { PLAIN, MBC1, MBC2, MBC3, MBC5, HUC1 } type = PLAIN;
+      enum Cartridgetype { PLAIN, MBC1, MBC2, MBC3, MBC5, HUC1, HUC3 } type = PLAIN;
+      bool rumble = false;
 
       {
          unsigned i;
@@ -465,38 +551,39 @@ namespace gambatte
 
          switch (header[0x0147])
          {
-            case 0x00: type = PLAIN; break;
-            case 0x01: type = MBC1; break;
-            case 0x02: type = MBC1; break;
-            case 0x03: type = MBC1; break;
-            case 0x05: type = MBC2; break;
-            case 0x06: type = MBC2; break;
-            case 0x08: type = MBC2; break;
-            case 0x09: type = MBC2;break;
-            case 0x0B: printf("MM01 ROM not supported.\n"); return -1;
-            case 0x0C: printf("MM01 ROM not supported.\n"); return -1;
-            case 0x0D: printf("MM01 ROM not supported.\n"); return -1;
-            case 0x0F: type = MBC3; break;
-            case 0x10: type = MBC3; break;
-            case 0x11: type = MBC3; break;
-            case 0x12: type = MBC3; break;
-            case 0x13: type = MBC3; break;
-            case 0x15: printf("MBC4 ROM not supported.\n"); return -1;
-            case 0x16: printf("MBC4 ROM not supported.\n"); return -1;
-            case 0x17: printf("MBC4 ROM not supported.\n"); return -1;
-            case 0x19: type = MBC5; break;
-            case 0x1A: type = MBC5; break;
-            case 0x1B: type = MBC5; break;
-            case 0x1C: type = MBC5; break;
-            case 0x1D: type = MBC5; break;
-            case 0x1E: type = MBC5; break;
-            case 0x20: printf("MBC6 ROM not supported.\n"); return -1;
-            case 0x22: printf("MBC7 ROM not supported.\n"); return -1;
-            case 0xFC: printf("Pocket Camera ROM not supported.\n"); return -1;
-            case 0xFD: printf("Bandai TAMA5 ROM not supported.\n"); return -1;
-            case 0xFE: printf("HuC3 ROM+RAM+BATTERY loaded.\n"); return -1;
-            case 0xFF: type = HUC1; break;
-            default: printf("Wrong data-format, corrupt or unsupported ROM.\n"); return -1;
+            case 0x00: gambatte_log(RETRO_LOG_INFO, "Plain ROM loaded.\n"); type = PLAIN; break;
+            case 0x01: gambatte_log(RETRO_LOG_INFO, "MBC1 ROM loaded.\n"); type = MBC1; break;
+            case 0x02: gambatte_log(RETRO_LOG_INFO, "MBC1 ROM+RAM loaded.\n"); type = MBC1; break;
+            case 0x03: gambatte_log(RETRO_LOG_INFO, "MBC1 ROM+RAM+BATTERY loaded.\n"); type = MBC1; break;
+            case 0x05: gambatte_log(RETRO_LOG_INFO, "MBC2 ROM loaded.\n"); type = MBC2; break;
+            case 0x06: gambatte_log(RETRO_LOG_INFO, "MBC2 ROM+BATTERY loaded.\n"); type = MBC2; break;
+            case 0x08: gambatte_log(RETRO_LOG_INFO, "Plain ROM with additional RAM loaded.\n"); type = MBC2; break;
+            case 0x09: gambatte_log(RETRO_LOG_INFO, "Plain ROM with additional RAM and Battery loaded.\n"); type = MBC2;break;
+            case 0x0B: gambatte_log(RETRO_LOG_INFO, "MM01 ROM not supported.\n"); return -1;
+            case 0x0C: gambatte_log(RETRO_LOG_INFO, "MM01 ROM not supported.\n"); return -1;
+            case 0x0D: gambatte_log(RETRO_LOG_INFO, "MM01 ROM not supported.\n"); return -1;
+            case 0x0F: gambatte_log(RETRO_LOG_INFO, "MBC3 ROM+TIMER+BATTERY loaded.\n"); type = MBC3; break;
+            case 0x10: gambatte_log(RETRO_LOG_INFO, "MBC3 ROM+TIMER+RAM+BATTERY loaded.\n"); type = MBC3; break;
+            case 0x11: gambatte_log(RETRO_LOG_INFO, "MBC3 ROM loaded.\n"); type = MBC3; break;
+            case 0x12: gambatte_log(RETRO_LOG_INFO, "MBC3 ROM+RAM loaded.\n"); type = MBC3; break;
+            case 0x13: gambatte_log(RETRO_LOG_INFO, "MBC3 ROM+RAM+BATTERY loaded.\n"); type = MBC3; break;
+            case 0x15: gambatte_log(RETRO_LOG_INFO, "MBC4 ROM not supported.\n"); return -1;
+            case 0x16: gambatte_log(RETRO_LOG_INFO, "MBC4 ROM not supported.\n"); return -1;
+            case 0x17: gambatte_log(RETRO_LOG_INFO, "MBC4 ROM not supported.\n"); return -1;
+            case 0x19: gambatte_log(RETRO_LOG_INFO, "MBC5 ROM loaded.\n"); type = MBC5; break;
+            case 0x1A: gambatte_log(RETRO_LOG_INFO, "MBC5 ROM+RAM loaded.\n"); type = MBC5; break;
+            case 0x1B: gambatte_log(RETRO_LOG_INFO, "MBC5 ROM+RAM+BATTERY loaded.\n"); type = MBC5; break;
+            case 0x1C: gambatte_log(RETRO_LOG_INFO, "MBC5+RUMBLE ROM loaded.\n"); type = MBC5; rumble = true; break;
+            case 0x1D: gambatte_log(RETRO_LOG_INFO, "MBC5+RUMBLE+RAM ROM loaded.\n"); type = MBC5; rumble = true; break;
+            case 0x1E: gambatte_log(RETRO_LOG_INFO, "MBC5+RUMBLE+RAM+BATTERY ROM loaded.\n"); type = MBC5; rumble = true; break;
+            case 0x20: gambatte_log(RETRO_LOG_INFO, "MBC6 ROM not supported.\n"); return -1;
+            case 0x22: gambatte_log(RETRO_LOG_INFO, "MBC7 ROM not supported.\n"); return -1;
+	     case 0xEA: type = MBC1; break; // Hack to accept 0xEA as a MBC1 (Sonic 3D Blast 5)
+            case 0xFC: gambatte_log(RETRO_LOG_INFO, "Pocket Camera ROM not supported.\n"); return -1;
+            case 0xFD: gambatte_log(RETRO_LOG_INFO, "Bandai TAMA5 ROM not supported.\n"); return -1;
+            case 0xFE: gambatte_log(RETRO_LOG_INFO, "HuC3 ROM+RAM+BATTERY loaded.\n"); type = HUC3; break;
+            case 0xFF: gambatte_log(RETRO_LOG_INFO, "HuC1 ROM+BATTERY loaded.\n"); type = HUC1; break;
+            default: gambatte_log(RETRO_LOG_INFO, "Wrong data-format, corrupt or unsupported ROM.\n"); return -1;
          }
 
          switch (header[0x0149])
@@ -532,12 +619,16 @@ namespace gambatte
          }
       }
 
+      gambatte_log(RETRO_LOG_INFO, "rambanks: %u\n", rambanks);
+
       rombanks = pow2ceil(romsize / 0x4000);
+      gambatte_log(RETRO_LOG_INFO, "rombanks: %u\n", static_cast<unsigned>(romsize / 0x4000));
 
       ggUndoList_.clear();
       mbc.reset();
       memptrs_.reset(rombanks, rambanks, cgb ? 8 : 2);
       rtc_.set(false, 0);
+      huc3_.set(false);
 
       memcpy(memptrs_.romdata(), romdata, ((romsize / 0x4000) * 0x4000ul) * sizeof(unsigned char));
       std::memset(memptrs_.romdata() + (romsize / 0x4000) * 0x4000ul, 0xFF, (rombanks - romsize / 0x4000) * 0x4000ul);
@@ -548,15 +639,19 @@ namespace gambatte
          case PLAIN: mbc.reset(new Mbc0(memptrs_)); break;
          case MBC1:
                      if (!rambanks && rombanks == 64 && multiCartCompat) {
-                        std::puts("Multi-ROM \"MBC1\" presumed");
+                        /*std::puts("Multi-ROM \"MBC1\" presumed");*/
                         mbc.reset(new Mbc1Multi64(memptrs_));
                      } else
                         mbc.reset(new Mbc1(memptrs_));
                      break;
          case MBC2: mbc.reset(new Mbc2(memptrs_)); break;
          case MBC3: mbc.reset(new Mbc3(memptrs_, hasRtc(memptrs_.romdata()[0x147]) ? &rtc_ : 0)); break;
-         case MBC5: mbc.reset(new Mbc5(memptrs_)); break;
+         case MBC5: mbc.reset(new Mbc5(memptrs_, rumble)); break;
          case HUC1: mbc.reset(new HuC1(memptrs_)); break;
+         case HUC3:
+            huc3_.set(true);
+            mbc.reset(new HuC3(memptrs_, &huc3_));
+            break;
       }
 
       return 0;
@@ -599,14 +694,6 @@ namespace gambatte
       if (loaded())
 #endif
       {
-         for (std::vector<AddrData>::reverse_iterator it = ggUndoList_.rbegin(), end = ggUndoList_.rend(); it != end; ++it)
-         {
-            if (memptrs_.romdata() + it->addr < memptrs_.romdataend())
-               memptrs_.romdata()[it->addr] = it->data;
-         }
-
-         ggUndoList_.clear();
-
          std::string code;
          for (std::size_t pos = 0; pos < codes.length()
                && (code = codes.substr(pos, codes.find(';', pos) - pos), true); pos += code.length() + 1)
@@ -614,4 +701,16 @@ namespace gambatte
       }
    }
 
+   void Cartridge::clearCheats()
+   {
+       for (std::vector<AddrData>::reverse_iterator it = ggUndoList_.rbegin(), end = ggUndoList_.rend(); it != end; ++it)
+          {
+             if (memptrs_.romdata() + it->addr < memptrs_.romdataend())
+                memptrs_.romdata()[it->addr] = it->data;
+          }
+
+       ggUndoList_.clear();
+   }
+
 }
+

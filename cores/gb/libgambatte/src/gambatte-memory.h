@@ -36,7 +36,7 @@ class SerialIO;
 class Memory {
 public:
    Bootloader bootloader;
-
+   
 	explicit Memory(Interrupter const &interrupter);
 	bool loaded() const { return cart_.loaded(); }
 	void setStatePtrs(SaveState &state);
@@ -48,11 +48,16 @@ public:
    void *rtcdata_ptr() { return cart_.rtcdata_ptr(); }
    unsigned rtcdata_size() { return cart_.rtcdata_size(); }
    void display_setColorCorrection(bool enable) { lcd_.setColorCorrection(enable); }
+   void display_setColorCorrectionMode(unsigned colorCorrectionMode) { lcd_.setColorCorrectionMode(colorCorrectionMode); }
+   void display_setColorCorrectionBrightness(float colorCorrectionBrightness) { lcd_.setColorCorrectionBrightness(colorCorrectionBrightness); }
+   void display_setDarkFilterLevel(unsigned darkFilterLevel) { lcd_.setDarkFilterLevel(darkFilterLevel); }
    video_pixel_t display_gbcToRgb32(const unsigned bgr15) { return lcd_.gbcToRgb32(bgr15); }
-   void clearCheats() { cart_.clearCheats(); }
+   void clearCheats() { cart_.clearCheats(); interrupter_.clearCheats(); }
    void *vram_ptr() const { return cart_.vramdata(); }
    void *rambank0_ptr() const { return cart_.wramdata(0); }
    void *rambank1_ptr() const { return cart_.wramdata(0) + 0x1000; }
+   void *rambank2_ptr() const { return cart_.wramdata(0) + 0x2000; }
+   void *bankedram_ptr() const { return cart_.wramdata(1); }
    void *rombank0_ptr() const { return cart_.romdata(0); }
    void *rombank1_ptr() const { return cart_.romdata(0) + 0x4000; }
    void *zeropage_ptr() const { return (void*)(ioamhram_ + 0x0180); }
@@ -70,11 +75,12 @@ public:
 	unsigned long nextEventTime() const { return intreq_.minEventTime(); }
 	bool isActive() const { return intreq_.eventTime(intevent_end) != disabled_time; }
 
-	long cyclesSinceBlit(unsigned long cc) const {
+	long cyclesSinceBlit(unsigned long cc) const
+   {
 		if (cc < intreq_.eventTime(intevent_blit))
 			return -1;
-
-		return (cc - intreq_.eventTime(intevent_blit)) >> isDoubleSpeed();
+      unsigned is_doublespeed = (unsigned)isDoubleSpeed();
+		return (cc - intreq_.eventTime(intevent_blit)) >> is_doublespeed;
 	}
 
 	void halt() { intreq_.halt(); }
@@ -114,7 +120,7 @@ public:
 	void setSerialIO(SerialIO* serial_io) { serial_io_ = serial_io; }
 #endif
 	void setEndtime(unsigned long cc, unsigned long inc);
-	void setSoundBuffer(uint_least32_t *buf) { psg_.setBuffer(buf); }
+	void setSoundBuffer(uint_least32_t *buf, std::size_t size) { psg_.setBuffer(buf, size); }
 	std::size_t fillSoundBuffer(unsigned long cc);
 
 	void setVideoBuffer(video_pixel_t *videoBuf, std::ptrdiff_t pitch) {
