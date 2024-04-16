@@ -10,9 +10,37 @@
 using namespace std;
 using namespace ::testing;
 
+vector<string> s_cores{
+	"fceumm",
+#ifndef __APPLE__
+	"gambatte",
+#endif
+	"genesis_plus_gx",
+	"mednafen_pce_fast",
+	"mgba",
+	"snes9x",
+	"stella",
+	"picodrive",
+};
+
 struct EmulatorTestParam {
 	string system;
 	string rom;
+};
+
+vector<EmulatorTestParam> s_systems{
+	{ "Nes", "Dr88-FamiconIntro.nes" },
+	{ "Snes", "Anthrox-SineDotDemo.sfc" },
+	{ "Genesis", "Dekadence-Dekadrive.md" },
+	{ "Atari2600", "automaton.a26" },
+#ifndef __APPLE__
+	{ "GameBoy", "dox-fire.gb" },
+#endif
+	{ "GbAdvance", "Vantage-LostMarbles.gba" },
+	{ "PCEngine", "chrisc-512_Colours.pce" },
+	{ "GameGear", "benryves-SegaTween.gg" },
+	{ "Sms", "blind-happy10.sms" },
+	{ "32x", "Palette-Tech-1-Demo.32x" },
 };
 
 class EmulatorTest : public TestWithParam<EmulatorTestParam> {
@@ -129,34 +157,6 @@ TEST_P(EmulatorTest, States) {
 	EXPECT_TRUE(e.unserialize(v.data(), v.size()));
 	e.run();
 }
-
-vector<EmulatorTestParam> s_systems{
-	{ "Nes", "Dr88-FamiconIntro.nes" },
-	{ "Snes", "Anthrox-SineDotDemo.sfc" },
-	{ "Genesis", "Dekadence-Dekadrive.md" },
-	{ "Atari2600", "automaton.a26" },
-#if !defined(__APPLE__)
-	{ "GameBoy", "dox-fire.gb" },
-#endif
-	{ "GbAdvance", "Vantage-LostMarbles.gba" },
-	{ "PCEngine", "chrisc-512_Colours.pce" },
-	{ "GameGear", "benryves-SegaTween.gg" },
-	{ "Sms", "blind-happy10.sms" },
-	{ "32x", "Palette-Tech-1-Demo.32x" },
-};
-
-vector<string> s_cores{
-	"fceumm",
-#if !defined(__APPLE__)
-	"gambatte",
-#endif
-	"genesis_plus_gx",
-	"mednafen_pce_fast",
-	"mgba",
-	"snes9x",
-	"stella",
-	"picodrive",
-};
 
 INSTANTIATE_TEST_CASE_P(EmulatorCore, EmulatorTest, ValuesIn(s_systems), EmulatorTestParamName());
 
