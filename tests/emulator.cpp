@@ -12,9 +12,7 @@ using namespace ::testing;
 
 vector<string> s_cores{
 	"fceumm",
-#ifndef __APPLE__
 	"gambatte",
-#endif
 	"genesis_plus_gx",
 	"mednafen_pce_fast",
 	"mgba",
@@ -33,9 +31,7 @@ vector<EmulatorTestParam> s_systems{
 	{ "Snes", "Anthrox-SineDotDemo.sfc" },
 	{ "Genesis", "Dekadence-Dekadrive.md" },
 	{ "Atari2600", "automaton.a26" },
-#ifndef __APPLE__
 	{ "GameBoy", "dox-fire.gb" },
-#endif
 	{ "GbAdvance", "Vantage-LostMarbles.gba" },
 	{ "PCEngine", "chrisc-512_Colours.pce" },
 	{ "GameGear", "benryves-SegaTween.gg" },
