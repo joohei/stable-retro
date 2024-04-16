@@ -21,25 +21,25 @@ public:
 };
 
 struct EmulatorTestParamName {
-    string operator()(const TestParamInfo<EmulatorTestParam>& info) const {
-        return info.param.system;
-   }
+	string operator()(const TestParamInfo<EmulatorTestParam>& info) const {
+		return info.param.system;
+	}
 };
 
 void EmulatorTest::SetUp() {
-    for (const string& core : { "fceumm", "gambatte", "genesis_plus_gx", "mednafen_pce_fast", "mgba", "snes9x", "stella", "picodrive" }) {
-        ifstream in("../retro/cores/" + core + ".json");
-        if (!in) {
-            continue;
-        }
-        ostringstream out;
-        Retro::corePath("../retro/cores");
-        string line;
-        while (getline(in, line)) {
-            out << line;
-        }
-        Retro::loadCoreInfo(out.str().c_str());
-    }
+	for (const string& core : s_cores) {
+		ifstream in("../retro/cores/" + core + ".json");
+		if (!in) {
+			continue;
+		}
+		ostringstream out;
+		Retro::corePath("../retro/cores");
+		string line;
+		while (getline(in, line)) {
+			out << line;
+		}
+		Retro::loadCoreInfo(out.str().c_str());
+	}
 }
 
 namespace Retro {
@@ -75,7 +75,6 @@ TEST_P(EmulatorTest, AutoUnload) {
 		ASSERT_TRUE(e.loadRom("roms/" + param.rom));
 	}
 }
-
 
 TEST_P(EmulatorTest, Unload) {
 	const auto& param = GetParam();
@@ -136,12 +135,27 @@ vector<EmulatorTestParam> s_systems{
 	{ "Snes", "Anthrox-SineDotDemo.sfc" },
 	{ "Genesis", "Dekadence-Dekadrive.md" },
 	{ "Atari2600", "automaton.a26" },
+#if !defined(__APPLE__)
 	{ "GameBoy", "dox-fire.gb" },
+#endif
 	{ "GbAdvance", "Vantage-LostMarbles.gba" },
 	{ "PCEngine", "chrisc-512_Colours.pce" },
 	{ "GameGear", "benryves-SegaTween.gg" },
 	{ "Sms", "blind-happy10.sms" },
 	{ "32x", "Palette-Tech-1-Demo.32x" },
+};
+
+vector<string> s_cores{
+	"fceumm",
+#if !defined(__APPLE__)
+	"gambatte",
+#endif
+	"genesis_plus_gx",
+	"mednafen_pce_fast",
+	"mgba",
+	"snes9x",
+	"stella",
+	"picodrive",
 };
 
 INSTANTIATE_TEST_CASE_P(EmulatorCore, EmulatorTest, ValuesIn(s_systems), EmulatorTestParamName());
