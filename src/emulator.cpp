@@ -192,9 +192,12 @@ void Emulator::unloadCore() {
 }
 
 void Emulator::unloadRom() {
+    printf("Unloading rom\n");
+    printf("Rom loaded: %d\n", m_romLoaded);
 	if (!m_romLoaded) {
 		return;
 	}
+	printf("Unloading game\n");
 	retro_unload_game();
 	m_romLoaded = false;
 	m_romPath.clear();
